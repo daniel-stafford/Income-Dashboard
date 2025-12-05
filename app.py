@@ -1,98 +1,196 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import os
 
 # 1. PAGE SETUP
-st.set_page_config(layout="wide", page_title="Income Dashboard")
+st.set_page_config(layout="wide", page_title="Income Distribution Dashboard")
+
+# --- CONFIGURATION MAPPING ---
+MODEL_CONFIG = {
+    "r2_simulated": {"pred_col": "simulated_daily_consumption", "name": "Simulated"},
+    "r2_m1_global": {"pred_col": "pred_m1_global", "name": "1. Global Base"},
+    "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
+    "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country FE"},
+    "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Survey Linear"},
+    "r2_m5_quad": {"pred_col": "pred_m5_quadratic", "name": "5. Survey Quad"},
+    "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Survey Cubic"},
+    "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Quartic"},
+}
 
 
 # 2. LOAD DATA
 @st.cache_data
 def load_data():
-    # Looks for file in the same folder
-    return pd.read_csv("dashboard_data.csv")
+    try:
+        # 1. Read File
+        df = pd.read_csv("dashboard_data.csv", sep=None, engine="python")
+
+        # 2. Clean Column Names
+        df.columns = df.columns.str.strip().str.lower()
+
+        # 3. Check for essential columns
+        if "iso3" not in df.columns:
+            st.error(f"❌ CRITICAL ERROR: 'iso3' column not found.")
+            st.stop()
+
+        # 4. Create ID
+        df["survey_id"] = df["iso3"] + "_" + df["year"].astype(str)
+        return df
+
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return None
 
 
-try:
-    df = load_data()
-except FileNotFoundError:
-    st.error(
-        "Error: 'dashboard_data.csv' not found. Make sure it is in the same folder as app.py"
-    )
+df = load_data()
+
+if df is None:
+    st.error("❌ 'dashboard_data.csv' not found.")
     st.stop()
 
-# Prepare Sorted List for Dropdown
-survey_scores = (
-    df[["cy", "r2_score"]].drop_duplicates().sort_values(by="r2_score", ascending=False)
-)
-survey_dict = dict(zip(survey_scores["cy"], survey_scores["r2_score"]))
+# 3. PRE-PROCESSING
+r2_cols = list(MODEL_CONFIG.keys())
+survey_stats = df.groupby("survey_id")[r2_cols].first().reset_index()
 
-# 3. SIDEBAR SELECTION
-st.sidebar.header("Settings")
-selected_cy = st.sidebar.selectbox(
-    "Select Survey (Best to Worst Fit):",
-    options=survey_scores["cy"],
-    format_func=lambda x: f"{x} (R2: {survey_dict[x]:.3f})",
+# Find Max R2 and Winner
+survey_stats["best_r2"] = survey_stats[r2_cols].max(axis=1)
+survey_stats["winning_col"] = survey_stats[r2_cols].idxmax(axis=1)
+survey_stats["winning_model"] = survey_stats["winning_col"].map(
+    lambda x: MODEL_CONFIG[x]["name"] if pd.notnull(x) else "None"
 )
 
-# 4. FILTER DATA
-dff = df[df["cy"] == selected_cy].copy()
+# Sort
+survey_stats = survey_stats.sort_values(by="best_r2", ascending=False)
+best_score_map = dict(zip(survey_stats["survey_id"], survey_stats["best_r2"]))
+winner_map = dict(zip(survey_stats["survey_id"], survey_stats["winning_model"]))
+sorted_survey_list = survey_stats["survey_id"].tolist()
 
-# Reshape for Plotly
-df_long = dff.melt(
-    id_vars=["cy", "percentile", "true_daily_consumption", "r2_score"],
-    value_vars=[c for c in df.columns if c.startswith("pred_")],
-    var_name="Model_Code",
-    value_name="Prediction",
+# 4. SIDEBAR
+st.sidebar.markdown("## Settings")
+
+
+def format_func(survey_id):
+    return f"{survey_id} (R2: {best_score_map[survey_id]:.3f})"
+
+
+selected_survey = st.sidebar.selectbox(
+    "Survey", options=sorted_survey_list, format_func=format_func
 )
 
-model_map = {
-    "pred_m1": "1. Global Base",
-    "pred_m2": "2. Gini Interaction",
-    "pred_m3": "3. Country FE",
-    "pred_m4": "4. Survey Linear",
-    "pred_m5": "5. Survey Quad",
-    "pred_m6": "6. Survey Cubic",
-    "pred_m7": "7. Survey Quartic",
-}
-df_long["Model"] = df_long["Model_Code"].map(model_map)
-
-# Add Truth Data
-df_true = dff[["percentile", "true_daily_consumption"]].copy()
-df_true["Prediction"] = df_true["true_daily_consumption"]
-df_true["Model"] = "TRUE INCOME"
-
-df_final = pd.concat([df_long, df_true], ignore_index=True)
-
-# 5. PLOT
-st.title(f"Survey: {selected_cy}")
-st.caption(f"Model 7 R-Squared Score: {dff['r2_score'].iloc[0]:.4f}")
-
-fig = px.line(
-    df_final,
-    x="percentile",
-    y="Prediction",
-    color="Model",
-    color_discrete_map={
-        "TRUE INCOME": "#F1C40F",
-        "1. Global Base": "#440154",
-        "2. Gini Interaction": "#482878",
-        "3. Country FE": "#3e4989",
-        "4. Survey Linear": "#31688e",
-        "5. Survey Quad": "#26828e",
-        "6. Survey Cubic": "#1f9e89",
-        "7. Survey Quartic": "#35b779",
-    },
-    height=600,
+# 5. MAIN CONTENT
+# UPDATED: Added a third tab and renamed the second one
+tab1, tab2, tab3 = st.tabs(
+    ["📈 Chart Visualization", "🏆 Best Model", "📊 Model Distribution"]
 )
 
-fig.update_traces(
-    mode="markers", marker=dict(size=6, opacity=0.8), selector=dict(name="TRUE INCOME")
-)
-fig.update_layout(
-    template="plotly_white",
-    legend=dict(orientation="h", y=1.05, x=0.5, xanchor="center"),
-)
+# --- TAB 1: CHART VISUALIZATION ---
+with tab1:
+    dff = df[df["survey_id"] == selected_survey].copy()
+    current_scores = {col: dff[col].iloc[0] for col in r2_cols}
 
-st.plotly_chart(fig, use_container_width=True)
+    st.markdown(f"### Survey: {selected_survey}")
+
+    # UPDATED: Display R2 scores for EVERY model in a clean table/expander
+    with st.expander("Show R² Scores for all models", expanded=True):
+        score_data = []
+        for r2_col, score in current_scores.items():
+            score_data.append(
+                {"Model Name": MODEL_CONFIG[r2_col]["name"], "R² Score": score}
+            )
+
+        score_df = pd.DataFrame(score_data).sort_values(by="R² Score", ascending=False)
+
+        # Highlight the best score
+        st.dataframe(
+            score_df.style.background_gradient(subset=["R² Score"], cmap="Greens"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Prepare Plot Data
+    rename_map = {"true_daily_consumption": "TRUE INCOME"}
+    for r2_col, config in MODEL_CONFIG.items():
+        if config["pred_col"] in dff.columns:
+            rename_map[config["pred_col"]] = config["name"]
+
+    plot_df = dff.rename(columns=rename_map).melt(
+        id_vars=["percentile"],
+        value_vars=list(rename_map.values()),
+        var_name="Model",
+        value_name="Prediction",
+    )
+
+    # Color Logic
+    color_map = {}
+    available_colors = px.colors.qualitative.G10
+    idx = 0
+    for m in plot_df["Model"].unique():
+        if m == "TRUE INCOME":
+            color_map[m] = "black"
+        elif m == "Simulated":
+            color_map[m] = "#FF0000"
+        else:
+            color_map[m] = available_colors[idx % len(available_colors)]
+            idx += 1
+
+    fig = px.line(
+        plot_df,
+        x="percentile",
+        y="Prediction",
+        color="Model",
+        color_discrete_map=color_map,
+        height=600,
+    )
+    fig.update_layout(
+        template="plotly_white",
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.1),
+    )
+    fig.update_traces(
+        selector={"name": "TRUE INCOME"},
+        mode="lines+markers",
+        line=dict(width=3, dash="dot", color="black"),
+    )
+    if "Simulated" in color_map:
+        fig.update_traces(
+            selector={"name": "Simulated"}, line=dict(width=3, color="red", dash="dash")
+        )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- TAB 2: BEST MODEL LIST ---
+with tab2:
+    st.markdown("### Best Model per Survey")
+    st.dataframe(
+        survey_stats[
+            ["survey_id", "winning_model", "best_r2"]
+        ].style.background_gradient(subset=["best_r2"], cmap="Greens"),
+        use_container_width=True,
+    )
+
+# --- TAB 3: MODEL DISTRIBUTION (NEW) ---
+with tab3:
+    st.markdown("### Which model wins most often?")
+
+    # Calculate counts and percentages
+    win_counts = survey_stats["winning_model"].value_counts().reset_index()
+    win_counts.columns = ["Model", "Count"]
+    win_counts["Percentage"] = (win_counts["Count"] / win_counts["Count"].sum()) * 100
+
+    # Create Bar Chart
+    fig_bar = px.bar(
+        win_counts,
+        x="Model",
+        y="Percentage",
+        text_auto=".1f",
+        title="Distribution of Best Performing Models",
+        color="Model",
+        hover_data=["Count"],
+    )
+
+    fig_bar.update_layout(yaxis_title="Percentage of Surveys Won (%)", showlegend=False)
+    fig_bar.update_traces(texttemplate="%{y:.1f}%", textposition="outside")
+
+    st.plotly_chart(fig_bar, use_container_width=True)
