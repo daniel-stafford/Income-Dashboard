@@ -13,10 +13,10 @@ MODEL_CONFIG = {
     "r2_m1_global": {"pred_col": "pred_m1_global", "name": "1. Global Base"},
     "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
     "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country FE"},
-    "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Survey Linear"},
-    "r2_m5_quad": {"pred_col": "pred_m5_quadratic", "name": "5. Survey Quad"},
-    "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Survey Cubic"},
-    "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Quartic"},
+    "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Simple Linear"},
+    "r2_m5_quad": {"pred_col": "pred_m5_quadratic", "name": "5. Simple Quad"},
+    "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Simple Cubic"},
+    "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Simple Quartic"},
 }
 
 
