@@ -102,9 +102,7 @@ min_p, max_p = st.sidebar.slider(
 st.sidebar.caption(f"Analyzing percentiles: **{min_p}% to {max_p}%**")
 
 # --- Tip ---
-st.sidebar.info(
-    "💡 **Tip:** Try a range like **0-99** or **5-95** to filter out extreme outliers."
-)
+st.sidebar.info("💡 **Tip:** Try a range like **0-99** to filter out extreme outliers.")
 
 # --- Filter Data ---
 filtered_df = raw_df[
