@@ -12,9 +12,8 @@ st.set_page_config(layout="wide", page_title="Income Distribution Dashboard")
 POP_FILENAME = "API_SP.POP.TOTL_DS2_en_csv_v2_246068.csv"
 MAIN_FILENAME = "dashboard_data.csv"
 
-# --- UPDATED NAMING CONVENTION BASED ON R CODE ---
-# Models 1-3 describe global/country economic structures.
-# Models 4-7 describe isolated fits for specific surveys (Country-Year Fixed Effects).
+# --- UPDATED NAMING CONVENTION ---
+# Renamed Model 1 to "Global Fixed Slope"
 MODEL_CONFIG = {
     "r2_simulated": {
         "pred_col": "simulated_daily_consumption",
@@ -22,7 +21,7 @@ MODEL_CONFIG = {
     },
     "r2_m1_global": {
         "pred_col": "pred_m1_global",
-        "name": "1. Global Base (Fixed Slope)",
+        "name": "1. Global Fixed Slope",
     },
     "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
     "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country-Specific Trends"},
@@ -34,6 +33,26 @@ MODEL_CONFIG = {
     "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Survey Fit (Cubic)"},
     "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Fit (Quartic)"},
 }
+
+# --- CONSISTENT COLOR PALETTE ---
+# Updated key for Model 1 to match new name
+COLOR_PALETTE = {
+    "0. Simulated": "#E31A1C",  # Red
+    "1. Global Fixed Slope": "#1F78B4",  # Dark Blue (Key Updated)
+    "2. Gini Interaction": "#A6CEE3",  # Light Blue
+    "3. Country-Specific Trends": "#33A02C",  # Dark Green
+    "4. Survey Fit (Linear)": "#B2DF8A",  # Light Green
+    "5. Survey Fit (Quadratic)": "#6A3D9A",  # Purple
+    "6. Survey Fit (Cubic)": "#FDBF6F",  # Light Orange
+    "7. Survey Fit (Quartic)": "#FF7F00",  # Dark Orange
+    "TRUE INCOME": "#FFD700",  # Gold (Yellow)
+    "None": "#999999",  # Grey
+}
+
+# Standard logical sort order (0-7) for legends and the big scroll chart
+MODEL_LOGICAL_ORDER = [config["name"] for config in MODEL_CONFIG.values()]
+MODEL_LOGICAL_ORDER.append("TRUE INCOME")
+MODEL_LOGICAL_ORDER.append("None")
 
 # --- INIT SESSION STATE FOR LOGGING ---
 if "change_log" not in st.session_state:
@@ -56,7 +75,6 @@ def load_data():
 
     if os.path.exists(POP_FILENAME):
         try:
-            # Skip 4 rows to match World Bank format
             pop_raw = pd.read_csv(POP_FILENAME, skiprows=4)
             year_cols = [c for c in pop_raw.columns if c.isdigit()]
             keep_cols = ["Country Code"] + year_cols
@@ -145,9 +163,7 @@ min_pop_mil = st.sidebar.number_input(
 min_pop_val = min_pop_mil * 1_000_000
 
 # 2. Percentile Input
-min_val_default = 1 if is_log_x else 0
 default_range = (1, 80)
-
 min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, default_range, 1)
 
 if is_log_x and min_p == 0:
@@ -373,7 +389,7 @@ tab_options = [
 ]
 
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "📜 Change Log"
+    st.session_state.active_tab = "🌍 Survey Scatter"
 
 selected_tab = st.radio(
     "Select View",
@@ -437,45 +453,36 @@ if selected_tab == "📈 Chart Visualization":
 
     plot_df["Prediction"] = plot_df["Prediction"].round(2)
 
-    color_map = {}
-    available_colors = px.colors.qualitative.G10
-    idx = 0
-    for m in plot_df["Model"].unique():
-        if m == "TRUE INCOME":
-            color_map[m] = "#FFC107"
-        elif "Simulated" in m:
-            color_map[m] = "#FF0000"
-        else:
-            color_map[m] = available_colors[idx % len(available_colors)]
-            idx += 1
-
+    # --- CHART: Use Consistent Colors & Logical Order ---
     fig = px.line(
         plot_df,
         x="percentile",
         y="Prediction",
         color="Model",
-        color_discrete_map=color_map,
+        color_discrete_map=COLOR_PALETTE,
+        category_orders={"Model": MODEL_LOGICAL_ORDER},  # Logical 0-7 order
         height=600,
         labels={"percentile": x_axis_label, "Prediction": y_axis_label},
     )
+
     fig.update_layout(
         template="plotly_white",
         hovermode="x unified",
         legend=dict(orientation="h", y=1.1),
     )
+
     fig.update_traces(
         selector={"name": "TRUE INCOME"},
         mode="markers",
-        marker=dict(size=8, color="#FFC107", symbol="circle"),
+        marker=dict(size=8, symbol="circle"),
     )
 
-    # Dynamic styling for simulated line
     sim_name = MODEL_CONFIG["r2_simulated"]["name"]
-    if sim_name in color_map:
-        fig.update_traces(
-            selector={"name": sim_name},
-            line=dict(width=3, color="red", dash="dash"),
-        )
+    fig.update_traces(
+        selector={"name": sim_name},
+        line=dict(width=3, dash="dash"),
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
 # --- VIEW 2: MODEL ANALYSIS ---
@@ -486,10 +493,20 @@ elif selected_tab == "📊 Model Analysis":
     win_counts.columns = ["Model", "Count"]
     win_counts["Percentage"] = (win_counts["Count"] / win_counts["Count"].sum()) * 100
 
+    # SORTING: Percent High -> Low (Left to Right)
+    win_counts = win_counts.sort_values(by="Percentage", ascending=False)
+    sorted_models_by_count = win_counts["Model"].tolist()
+
     fig_bar = px.bar(
-        win_counts, x="Model", y="Percentage", text_auto=".2f", color="Model"
+        win_counts,
+        x="Model",
+        y="Percentage",
+        text_auto=".2f",
+        color="Model",
+        color_discrete_map=COLOR_PALETTE,  # Keeps colors consistent despite new order
+        category_orders={"Model": sorted_models_by_count},  # Forces sorting by %
     )
-    fig_bar.update_layout(yaxis_title="Percentage Won (%)", showlegend=False)
+    fig_bar.update_layout(yaxis_title="Percentage Won (%)", showlegend=True)
     fig_bar.update_traces(texttemplate="%{y:.2f}%", textposition="outside")
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -520,6 +537,8 @@ elif selected_tab == "📊 Model Analysis":
         x="rank_index",
         y="visual_r2",
         color="winning_model",
+        color_discrete_map=COLOR_PALETTE,
+        category_orders={"winning_model": MODEL_LOGICAL_ORDER},  # Legend stays 0-7
         hover_name="survey_id",
         hover_data={"best_r2": ":.3f", "visual_r2": False, "rank_index": False},
         width=total_width,
@@ -647,7 +666,7 @@ elif selected_tab == "📝 Model Equations":
     st.markdown("---")
 
     # --- MODEL 1 ---
-    st.subheader("1. Global Base")
+    st.subheader("1. Global Fixed Slope")
     st.markdown("_GDP sets the level; one global slope for the percentile._")
 
     c1, c2 = st.columns([1, 1])
