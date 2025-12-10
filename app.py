@@ -119,7 +119,7 @@ st.sidebar.markdown("## ⚙️ Settings")
 
 # --- INPUTS ---
 scale_mode = st.sidebar.radio(
-    "Select Analysis Scale", options=["Linear", "Log-Log", "Log-Linear"], index=0
+    "Select Analysis Scale", options=["Linear", "Log-Log", "Log-Linear"], index=2
 )
 is_linear = scale_mode == "Linear"
 is_log_y = scale_mode in ["Log-Log", "Log-Linear"]
@@ -127,14 +127,19 @@ is_log_x = scale_mode == "Log-Log"
 
 st.sidebar.markdown("---")
 # 1. Population Input
+# --- UPDATED DEFAULT TO 1.0 ---
 min_pop_mil = st.sidebar.number_input(
-    "Min Population (Millions)", 0.0, 1000.0, 0.0, 0.5
+    "Min Population (Millions)", 0.0, 1000.0, 1.0, 0.5
 )
 min_pop_val = min_pop_mil * 1_000_000
 
 # 2. Percentile Input
 min_val_default = 1 if is_log_x else 0
-min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, (min_val_default, 100), 1)
+
+# --- UPDATED DEFAULT RANGE TO (1, 80) ---
+default_range = (1, 80)
+
+min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, default_range, 1)
 
 if is_log_x and min_p == 0:
     st.sidebar.warning("⚠️ Log-Log scale requires Percentile > 0.")
@@ -146,18 +151,29 @@ if min_pop_val > 0:
     mask = mask & (raw_df["population"].fillna(0) >= min_pop_val)
 filtered_df = raw_df[mask].copy()
 
-# --- EXCLUDED COUNTRIES LIST (Placed below filters) ---
-all_countries = set(raw_df["iso3"].unique())
-kept_countries = set(filtered_df["iso3"].unique()) if not filtered_df.empty else set()
-excluded_countries = sorted(list(all_countries - kept_countries))
+# --- EXCLUDED SURVEYS LIST (Updated to show Survey + Year) ---
+all_surveys = set(raw_df["survey_id"].unique())
+kept_surveys = (
+    set(filtered_df["survey_id"].unique()) if not filtered_df.empty else set()
+)
+excluded_surveys = sorted(list(all_surveys - kept_surveys))
 
-if excluded_countries:
+if excluded_surveys:
     st.sidebar.markdown("---")
-    with st.sidebar.expander(f"❌ Excluded Countries ({len(excluded_countries)})"):
-        st.write(", ".join(excluded_countries))
+    with st.sidebar.expander(f"❌ Excluded Surveys ({len(excluded_surveys)})"):
+        # Helper to format "RUS_2014" -> "RUS (2014)"
+        def format_survey_label(s_id):
+            try:
+                parts = s_id.split("_")
+                return f"{parts[0]} ({parts[1]})"
+            except:
+                return s_id
+
+        formatted_list = [format_survey_label(s) for s in excluded_surveys]
+        st.write(", ".join(formatted_list))
 else:
     if not filtered_df.empty:
-        st.sidebar.caption("✅ No countries excluded by filters.")
+        st.sidebar.caption("✅ No surveys excluded by filters.")
 
 if filtered_df.empty:
     st.error("❌ No data found with current filters.")
