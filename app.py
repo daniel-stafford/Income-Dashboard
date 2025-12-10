@@ -44,6 +44,7 @@ def load_data():
 
     if os.path.exists(POP_FILENAME):
         try:
+            # Skip 4 rows to match World Bank format
             pop_raw = pd.read_csv(POP_FILENAME, skiprows=4)
             year_cols = [c for c in pop_raw.columns if c.isdigit()]
             keep_cols = ["Country Code"] + year_cols
@@ -125,12 +126,13 @@ is_log_y = scale_mode in ["Log-Log", "Log-Linear"]
 is_log_x = scale_mode == "Log-Log"
 
 st.sidebar.markdown("---")
+# 1. Population Input
 min_pop_mil = st.sidebar.number_input(
     "Min Population (Millions)", 0.0, 1000.0, 0.0, 0.5
 )
 min_pop_val = min_pop_mil * 1_000_000
 
-st.sidebar.markdown("---")
+# 2. Percentile Input
 min_val_default = 1 if is_log_x else 0
 min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, (min_val_default, 100), 1)
 
@@ -138,7 +140,34 @@ if is_log_x and min_p == 0:
     st.sidebar.warning("⚠️ Log-Log scale requires Percentile > 0.")
     min_p = 1
 
-# Thresholds (Moved to sidebar for easier tracking in log)
+# --- FILTERING LOGIC ---
+mask = (raw_df["percentile"] >= min_p) & (raw_df["percentile"] <= max_p)
+if min_pop_val > 0:
+    mask = mask & (raw_df["population"].fillna(0) >= min_pop_val)
+filtered_df = raw_df[mask].copy()
+
+# --- EXCLUDED COUNTRIES LIST (Placed below filters) ---
+all_countries = set(raw_df["iso3"].unique())
+kept_countries = set(filtered_df["iso3"].unique()) if not filtered_df.empty else set()
+excluded_countries = sorted(list(all_countries - kept_countries))
+
+if excluded_countries:
+    st.sidebar.markdown("---")
+    with st.sidebar.expander(f"❌ Excluded Countries ({len(excluded_countries)})"):
+        st.write(", ".join(excluded_countries))
+else:
+    if not filtered_df.empty:
+        st.sidebar.caption("✅ No countries excluded by filters.")
+
+if filtered_df.empty:
+    st.error("❌ No data found with current filters.")
+    st.stop()
+
+unique_surveys = filtered_df["survey_id"].nunique()
+st.sidebar.caption(f"Surveys Included: **{unique_surveys}**")
+
+
+# --- Quality Thresholds ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Quality Thresholds**")
 c_low, c_high = st.sidebar.columns(2)
@@ -147,27 +176,6 @@ with c_low:
 with c_high:
     thresh_high = st.number_input("High >", 0.0, 1.0, 0.90, 0.05)
 
-# --- FILTERING ---
-mask = (raw_df["percentile"] >= min_p) & (raw_df["percentile"] <= max_p)
-if min_pop_val > 0:
-    mask = mask & (raw_df["population"].fillna(0) >= min_pop_val)
-filtered_df = raw_df[mask].copy()
-
-# Excluded list
-all_countries = set(raw_df["iso3"].unique())
-kept_countries = set(filtered_df["iso3"].unique()) if not filtered_df.empty else set()
-excluded_countries = sorted(list(all_countries - kept_countries))
-
-if excluded_countries:
-    with st.sidebar.expander(f"❌ Excluded ({len(excluded_countries)})"):
-        st.write(", ".join(excluded_countries))
-
-if filtered_df.empty:
-    st.error("❌ No data found with current filters.")
-    st.stop()
-
-unique_surveys = filtered_df["survey_id"].nunique()
-st.sidebar.caption(f"Surveys Included: **{unique_surveys}**")
 
 # --- CALCULATIONS ---
 survey_stats = calculate_dynamic_stats(filtered_df, log_y=is_log_y)
@@ -236,24 +244,21 @@ current_results = {
     "high": count_high,
     "med": count_med,
     "low": count_low,
-    "label_high": label_high,  # Store labels as they change with thresholds
+    "label_high": label_high,
     "label_med": label_med,
     "label_low": label_low,
 }
 
 # --- LOGGING LOGIC ---
-# Check if this state is different from the last one logged
 should_log = False
 if not st.session_state.change_log:
     should_log = True
 else:
     last_entry = st.session_state.change_log[-1]
-    # Compare inputs
     if current_params != last_entry["params"]:
         should_log = True
 
 if should_log:
-    # Calculate Deltas (if previous exists)
     deltas = {}
     changes = []
 
@@ -267,16 +272,13 @@ if should_log:
         deltas["med"] = current_results["med"] - last_res["med"]
         deltas["low"] = current_results["low"] - last_res["low"]
 
-        # Detect what parameter changed
         for k, v in current_params.items():
             if v != last_par[k]:
                 changes.append(f"{k}: {last_par[k]} → {v}")
     else:
-        # Initial state (deltas are 0)
         deltas = {"n_surveys": 0, "high": 0, "med": 0, "low": 0}
         changes = ["Initial Load"]
 
-    # Append
     st.session_state.change_log.append(
         {
             "id": len(st.session_state.change_log) + 1,
@@ -307,6 +309,12 @@ def format_func(survey_id):
     return f"{survey_id} (R²: {score:.2f})"
 
 
+# ==========================================
+# SEPARATOR & HEADER FOR SURVEY SELECTION
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Select Survey**")
+
 selected_survey = st.sidebar.selectbox(
     "Select Survey",
     options=sorted_survey_list,
@@ -314,6 +322,7 @@ selected_survey = st.sidebar.selectbox(
     index=pre_selected_index,
     key="survey_widget",
     on_change=update_survey_selection,
+    label_visibility="collapsed",
 )
 
 # --- SIDEBAR: GLOBAL AVERAGES ---
@@ -337,8 +346,10 @@ tab_options = [
     "📝 Model Equations",
     "📜 Change Log",
 ]
+
+# --- UPDATED DEFAULT TAB SELECTION ---
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = tab_options[0]
+    st.session_state.active_tab = "📜 Change Log"
 
 selected_tab = st.radio(
     "Select View",
@@ -456,12 +467,59 @@ elif selected_tab == "📊 Model Analysis":
     st.plotly_chart(fig_bar, use_container_width=True)
 
     st.markdown("---")
-    st.dataframe(
-        survey_stats[["survey_id", "winning_model", "best_r2"]]
-        .style.background_gradient(subset=["best_r2"], cmap="Greens")
-        .format({"best_r2": "{:.2f}"}),
-        use_container_width=True,
+    st.markdown("### 🏆 Survey Performance")
+
+    # 1. Sort Options
+    sort_order = st.radio(
+        "Sort Order:",
+        options=["Best to Worst (High -> Low)", "Worst to Best (Low -> High)"],
+        horizontal=True,
     )
+
+    if "Best to Worst" in sort_order:
+        chart_df = survey_stats.sort_values(by="best_r2", ascending=False)
+    else:
+        chart_df = survey_stats.sort_values(by="best_r2", ascending=True)
+
+    # 2. Add Rank Index (0 to N) for x-axis
+    chart_df = chart_df.reset_index(drop=True)
+    chart_df["rank_index"] = chart_df.index
+
+    # 3. Create a Capped R2 Column for Visualization
+    #    Values < -0.1 are set to -0.1
+    chart_df["visual_r2"] = np.maximum(chart_df["best_r2"], -0.1)
+
+    # 4. Dynamic Width Calculation
+    total_width = max(1000, len(chart_df) * 15)
+
+    st.caption(f"Displaying **{len(chart_df)}** surveys. Scroll right to see more ->")
+
+    # 5. Create Vertical Bar Chart
+    #    Note: We plot 'visual_r2' for height, but show true 'best_r2' in hover
+    fig_scroll = px.bar(
+        chart_df,
+        x="rank_index",
+        y="visual_r2",
+        color="winning_model",
+        hover_name="survey_id",
+        hover_data={"best_r2": ":.3f", "visual_r2": False, "rank_index": False},
+        width=total_width,
+        height=600,
+        text_auto=".3f",
+        title=f"All Surveys ({len(chart_df)})",
+    )
+
+    fig_scroll.update_layout(
+        xaxis_title="Survey Count (Index)",
+        yaxis_title="Best R² Score (Capped at -0.1)",
+        legend_title="Winning Model",
+        margin=dict(l=50, r=50, t=50, b=50),
+    )
+
+    fig_scroll.update_traces(textposition="outside")
+
+    st.plotly_chart(fig_scroll, use_container_width=False)
+
 
 # --- VIEW 3: SCATTER OVERVIEW ---
 elif selected_tab == "🌍 Survey Scatter":
@@ -583,7 +641,7 @@ elif selected_tab == "📝 Model Equations":
     cols[2].latex(rf"{Y_term} \sim {P_term}^3")
     cols[3].latex(rf"{Y_term} \sim {P_term}^4")
 
-# --- VIEW 5: CHANGE LOG (NEW) ---
+# --- VIEW 5: CHANGE LOG ---
 elif selected_tab == "📜 Change Log":
     st.markdown("### 📜 Session History")
     st.caption(
@@ -599,40 +657,28 @@ elif selected_tab == "📜 Change Log":
             delta = entry["deltas"]
             params = entry["params"]
 
-            # Helper to format delta
-            def fmt_delta(val):
-                if val > 0:
-                    return f"(+{val})"
-                elif val < 0:
-                    return f"({val})"
-                else:
-                    return ""  # Don't show if 0
+            # Helper: pass raw number to metric for automatic color
+            def get_delta(val):
+                return val if val != 0 else None
 
-            # Card-like container
             with st.container():
                 st.markdown(f"#### Step {entry['id']}: {entry['changes_txt']}")
 
                 c1, c2, c3, c4 = st.columns(4)
 
-                # Metric 1: Survey Count
-                c1.metric("Surveys", res["n_surveys"], fmt_delta(delta["n_surveys"]))
-
-                # Metric 2: High Quality
-                # Note: We use the stored label from that snapshot in case thresholds changed
-                c2.metric(
-                    f"🟢 {res['label_high']}", res["high"], fmt_delta(delta["high"])
+                c1.metric(
+                    "Surveys", res["n_surveys"], delta=get_delta(delta["n_surveys"])
                 )
-
-                # Metric 3: Med Quality
-                c3.metric(f"🟡 {res['label_med']}", res["med"], fmt_delta(delta["med"]))
-
-                # Metric 4: Low Quality
+                c2.metric(
+                    f"🟢 {res['label_high']}",
+                    res["high"],
+                    delta=get_delta(delta["high"]),
+                )
+                c3.metric(
+                    f"🟡 {res['label_med']}", res["med"], delta=get_delta(delta["med"])
+                )
                 c4.metric(
-                    f"🔴 {res['label_low']}",
-                    res["low"],
-                    fmt_delta(
-                        delta["low"],
-                    ),
+                    f"🔴 {res['label_low']}", res["low"], delta=get_delta(delta["low"])
                 )
 
                 st.divider()
