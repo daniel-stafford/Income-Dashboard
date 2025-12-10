@@ -12,15 +12,27 @@ st.set_page_config(layout="wide", page_title="Income Distribution Dashboard")
 POP_FILENAME = "API_SP.POP.TOTL_DS2_en_csv_v2_246068.csv"
 MAIN_FILENAME = "dashboard_data.csv"
 
+# --- UPDATED NAMING CONVENTION BASED ON R CODE ---
+# Models 1-3 describe global/country economic structures.
+# Models 4-7 describe isolated fits for specific surveys (Country-Year Fixed Effects).
 MODEL_CONFIG = {
-    "r2_simulated": {"pred_col": "simulated_daily_consumption", "name": "0. Simulated"},
-    "r2_m1_global": {"pred_col": "pred_m1_global", "name": "1. Global Base"},
+    "r2_simulated": {
+        "pred_col": "simulated_daily_consumption",
+        "name": "0. Simulated",
+    },
+    "r2_m1_global": {
+        "pred_col": "pred_m1_global",
+        "name": "1. Global Base (Fixed Slope)",
+    },
     "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
-    "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country FE"},
-    "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Simple Linear"},
-    "r2_m5_quad": {"pred_col": "pred_m5_quadratic", "name": "5. Simple Quad"},
-    "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Simple Cubic"},
-    "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Simple Quartic"},
+    "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country-Specific Trends"},
+    "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Survey Fit (Linear)"},
+    "r2_m5_quad": {
+        "pred_col": "pred_m5_quadratic",
+        "name": "5. Survey Fit (Quadratic)",
+    },
+    "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Survey Fit (Cubic)"},
+    "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Fit (Quartic)"},
 }
 
 # --- INIT SESSION STATE FOR LOGGING ---
@@ -127,7 +139,6 @@ is_log_x = scale_mode == "Log-Log"
 
 st.sidebar.markdown("---")
 # 1. Population Input
-# --- UPDATED DEFAULT TO 1.0 ---
 min_pop_mil = st.sidebar.number_input(
     "Min Population (Millions)", 0.0, 1000.0, 1.0, 0.5
 )
@@ -135,8 +146,6 @@ min_pop_val = min_pop_mil * 1_000_000
 
 # 2. Percentile Input
 min_val_default = 1 if is_log_x else 0
-
-# --- UPDATED DEFAULT RANGE TO (1, 80) ---
 default_range = (1, 80)
 
 min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, default_range, 1)
@@ -151,7 +160,7 @@ if min_pop_val > 0:
     mask = mask & (raw_df["population"].fillna(0) >= min_pop_val)
 filtered_df = raw_df[mask].copy()
 
-# --- EXCLUDED SURVEYS LIST (Updated to show Survey + Year) ---
+# --- EXCLUDED SURVEYS LIST ---
 all_surveys = set(raw_df["survey_id"].unique())
 kept_surveys = (
     set(filtered_df["survey_id"].unique()) if not filtered_df.empty else set()
@@ -161,7 +170,7 @@ excluded_surveys = sorted(list(all_surveys - kept_surveys))
 if excluded_surveys:
     st.sidebar.markdown("---")
     with st.sidebar.expander(f"❌ Excluded Surveys ({len(excluded_surveys)})"):
-        # Helper to format "RUS_2014" -> "RUS (2014)"
+
         def format_survey_label(s_id):
             try:
                 parts = s_id.split("_")
@@ -326,7 +335,7 @@ def format_func(survey_id):
 
 
 # ==========================================
-# SEPARATOR & HEADER FOR SURVEY SELECTION
+# SIDEBAR: SURVEY SELECTION
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Select Survey**")
@@ -363,7 +372,6 @@ tab_options = [
     "📜 Change Log",
 ]
 
-# --- UPDATED DEFAULT TAB SELECTION ---
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "📜 Change Log"
 
@@ -435,7 +443,7 @@ if selected_tab == "📈 Chart Visualization":
     for m in plot_df["Model"].unique():
         if m == "TRUE INCOME":
             color_map[m] = "#FFC107"
-        elif m == "0. Simulated":
+        elif "Simulated" in m:
             color_map[m] = "#FF0000"
         else:
             color_map[m] = available_colors[idx % len(available_colors)]
@@ -460,9 +468,12 @@ if selected_tab == "📈 Chart Visualization":
         mode="markers",
         marker=dict(size=8, color="#FFC107", symbol="circle"),
     )
-    if "0. Simulated" in color_map:
+
+    # Dynamic styling for simulated line
+    sim_name = MODEL_CONFIG["r2_simulated"]["name"]
+    if sim_name in color_map:
         fig.update_traces(
-            selector={"name": "0. Simulated"},
+            selector={"name": sim_name},
             line=dict(width=3, color="red", dash="dash"),
         )
     st.plotly_chart(fig, use_container_width=True)
@@ -485,7 +496,6 @@ elif selected_tab == "📊 Model Analysis":
     st.markdown("---")
     st.markdown("### 🏆 Survey Performance")
 
-    # 1. Sort Options
     sort_order = st.radio(
         "Sort Order:",
         options=["Best to Worst (High -> Low)", "Worst to Best (Low -> High)"],
@@ -497,21 +507,14 @@ elif selected_tab == "📊 Model Analysis":
     else:
         chart_df = survey_stats.sort_values(by="best_r2", ascending=True)
 
-    # 2. Add Rank Index (0 to N) for x-axis
     chart_df = chart_df.reset_index(drop=True)
     chart_df["rank_index"] = chart_df.index
-
-    # 3. Create a Capped R2 Column for Visualization
-    #    Values < -0.1 are set to -0.1
     chart_df["visual_r2"] = np.maximum(chart_df["best_r2"], -0.1)
 
-    # 4. Dynamic Width Calculation
     total_width = max(1000, len(chart_df) * 15)
 
     st.caption(f"Displaying **{len(chart_df)}** surveys. Scroll right to see more ->")
 
-    # 5. Create Vertical Bar Chart
-    #    Note: We plot 'visual_r2' for height, but show true 'best_r2' in hover
     fig_scroll = px.bar(
         chart_df,
         x="rank_index",
@@ -533,7 +536,6 @@ elif selected_tab == "📊 Model Analysis":
     )
 
     fig_scroll.update_traces(textposition="outside")
-
     st.plotly_chart(fig_scroll, use_container_width=False)
 
 
@@ -541,14 +543,12 @@ elif selected_tab == "📊 Model Analysis":
 elif selected_tab == "🌍 Survey Scatter":
     st.markdown("### 🌍 Global Performance Overview")
 
-    # Merge Meta
     survey_meta = filtered_df[
         ["survey_id", "iso3", "year", "gdp_pcap", "gini_disp", "population"]
     ].drop_duplicates()
     scatter_df = pd.merge(survey_stats, survey_meta, on="survey_id", how="inner")
     scatter_df["pop_m"] = scatter_df["population"] / 1_000_000
 
-    # Colors
     color_map_scatter = {
         label_high: "#28a745",
         label_med: "#ffc107",
@@ -616,46 +616,144 @@ elif selected_tab == "🌍 Survey Scatter":
 # --- VIEW 4: MODEL EQUATIONS ---
 elif selected_tab == "📝 Model Equations":
     st.markdown("### 📝 Model Specifications")
+    st.write(
+        "Below are the equations corresponding to the R `fixest` regressions and their Stata equivalents."
+    )
+
+    # --- SETUP NOTATION ---
+    st.info(
+        "ℹ️ **Notation:** Subscripts denote **p**ercentile ($p$), **c**ountry ($c$), and **y**ear ($y$)."
+    )
 
     if scale_mode == "Linear":
-        st.caption("ℹ️ **Mode: Linear.**")
-        Y_term = r"Y_{icy}"
-        P_term = r"P_i"
-    elif scale_mode == "Log-Log":
-        st.caption("⚠️ **Mode: Log-Log.**")
-        Y_term = r"\ln(Y_{icy})"
-        P_term = r"\ln(P_i)"
-    elif scale_mode == "Log-Linear":
-        st.caption("⚠️ **Mode: Log-Linear.**")
-        Y_term = r"\ln(Y_{icy})"
-        P_term = r"P_i"
-
-    st.markdown(rf"**Notation:** ${Y_term}$ Consumption, ${P_term}$ Percentile.")
-    st.divider()
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.info("##### 1. Global Base")
         st.markdown(
-            rf"$$ {Y_term} = \beta_0 + \beta_1 \text{{GDP}} + \beta_2 {P_term} $$"
+            r"**Definitions:** $Y = \text{Consumption}$, $P = \text{Percentile Rank (1-100)}$."
         )
-        st.info("##### 2. Gini Interaction")
+        Y_term = "Y_{p,c,y}"
+        P_term = "P"
+    elif scale_mode == "Log-Log":
         st.markdown(
-            rf"$$ {Y_term} = \dots + \beta_3 {P_term} + \beta_4 ({P_term} \times \text{{Gini}}) $$"
+            r"**Definitions:** $Y = \ln(\text{Consumption})$, $P = \ln(\text{Percentile Rank})$."
+        )
+        Y_term = r"\ln(Y_{p,c,y})"
+        P_term = r"\ln(P)"
+    elif scale_mode == "Log-Linear":
+        st.markdown(
+            r"**Definitions:** $Y = \ln(\text{Consumption})$, $P = \text{Percentile Rank (1-100)}$."
+        )
+        Y_term = r"\ln(Y_{p,c,y})"
+        P_term = "P"
+
+    st.markdown("---")
+
+    # --- MODEL 1 ---
+    st.subheader("1. Global Base")
+    st.markdown("_GDP sets the level; one global slope for the percentile._")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown(
+            r"**Math:** $$ "
+            + Y_term
+            + r" = \beta_0 + \beta_1 \text{GDP}_{c,y} + \beta_2 "
+            + P_term
+            + r" + \epsilon $$"
         )
     with c2:
-        st.info("##### 3. Country FE")
-        st.markdown(rf"$$ {Y_term} = \alpha_c + \gamma_c {P_term} + \dots $$")
-        st.warning("##### 0. Simulated")
-        st.markdown("Baseline synthetic data.")
+        st.markdown("**R Code (`fixest`):**")
+        st.code("feols(Y ~ gdp + pct, cluster = ~iso3)", language="r")
+        st.markdown("**Stata:**")
+        st.code("reg Y gdp pct, vce(cluster iso3)", language="stata")
 
     st.divider()
-    st.latex(rf"{Y_term} = \alpha_{{cy}} + \sum \beta ({P_term})^k")
-    cols = st.columns(4)
-    cols[0].latex(rf"{Y_term} \sim {P_term}")
-    cols[1].latex(rf"{Y_term} \sim {P_term}^2")
-    cols[2].latex(rf"{Y_term} \sim {P_term}^3")
-    cols[3].latex(rf"{Y_term} \sim {P_term}^4")
+
+    # --- MODEL 2 ---
+    st.subheader("2. Gini Interaction")
+    st.markdown("_GDP and Gini set the level; Gini shapes the percentile slope._")
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown(
+            r"**Math:** $$ "
+            + Y_term
+            + r" = \beta_0 + \beta_1 \text{GDP}_{c,y} + \beta_2 \text{Gini}_{c,y} + \beta_3 ("
+            + P_term
+            + r" \times \text{Gini}_{c,y}) + \epsilon $$"
+        )
+    with c2:
+        st.markdown("**R Code (`fixest`):**")
+        st.code("feols(Y ~ gdp + gini + pct * gini, cluster=~iso3)", language="r")
+        st.markdown("**Stata:**")
+        st.code("reg Y gdp gini c.pct##c.gini, vce(cluster iso3)", language="stata")
+
+    st.divider()
+
+    # --- MODEL 3 ---
+    st.subheader("3. Country-Specific Trends")
+    st.markdown(
+        "_GDP and Country Fixed Effects set the level; Country FEs determine specific slopes._"
+    )
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown(
+            r"**Math:** $$ "
+            + Y_term
+            + r" = \alpha_c + \beta_1 \text{GDP}_{c,y} + \beta_{2,c} "
+            + P_term
+            + r" + \epsilon $$"
+        )
+        st.caption(
+            r"Where $\alpha_c$ is the country intercept and $\beta_{2,c}$ is the country-specific slope."
+        )
+    with c2:
+        st.markdown("**R Code (`fixest`):**")
+        st.code("feols(Y ~ gdp | iso3[pct])", language="r")
+        st.markdown("**Stata:**")
+        st.code("reg Y gdp i.iso3##c.pct, vce(cluster iso3)", language="stata")
+
+    st.divider()
+
+    # --- MODEL 4-7 ---
+    st.subheader("4 - 7. Survey-Specific Fits (Polynomials)")
+    st.markdown(
+        "_The survey (Country-Year) Fixed Effect sets the level; the interaction fits a unique curve to every survey._"
+    )
+
+    st.markdown(
+        r"**Math:** $$ "
+        + Y_term
+        + r" = \alpha_{c,y} + \sum_{k=1}^{K} \beta_{k,c,y} ("
+        + P_term
+        + r")^k + \epsilon $$"
+    )
+    st.caption(
+        "Every survey (Country-Year) gets its own intercept and slope(s). $K$ determines flexibility (Linear to Quartic)."
+    )
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.markdown("**R Code (General):**")
+        st.code(
+            """
+# K=1 (Linear Trend per Survey)
+feols(Y ~ 1 | iso3^year[pct])
+
+# K=4 (Quartic Trend per Survey)
+feols(Y ~ 1 | iso3^year[pct + pct^2 + pct^3 + pct^4])
+        """,
+            language="r",
+        )
+    with c2:
+        st.markdown("**Stata (`reghdfe` package):**")
+        st.code(
+            """
+# Absorbing the interaction of
+# Country-Year and Percentile
+reghdfe Y, absorb(iso3#year##c.pct)
+        """,
+            language="stata",
+        )
 
 # --- VIEW 5: CHANGE LOG ---
 elif selected_tab == "📜 Change Log":
@@ -673,7 +771,6 @@ elif selected_tab == "📜 Change Log":
             delta = entry["deltas"]
             params = entry["params"]
 
-            # Helper: pass raw number to metric for automatic color
             def get_delta(val):
                 return val if val != 0 else None
 
