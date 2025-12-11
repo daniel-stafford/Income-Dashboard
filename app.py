@@ -402,7 +402,7 @@ tab_options = [
     "📊 Model Analysis",
     "🌍 Survey Scatter",
     "🗺️ Coverage Map",
-    "📝 Model Equations",
+    "📝 Model Equations (Work in Progress)",
     "📜 Change Log",
 ]
 
