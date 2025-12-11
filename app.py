@@ -237,7 +237,7 @@ if excluded_ids:
         st.write(", ".join(excluded_ids))
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Quality Thresholds**")
+st.sidebar.markdown("**$R^2$ Quality Thresholds**")
 c_low, c_high = st.sidebar.columns(2)
 with c_low:
     thresh_low = st.number_input("Low <", 0.0, 1.0, 0.70, 0.05)
