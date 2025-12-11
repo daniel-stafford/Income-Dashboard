@@ -3,26 +3,30 @@ import pandas as pd
 import plotly.express as px
 import numpy as np
 import os
-import copy  # For deep copying dictionaries
+import geopandas as gpd
 
 # 1. PAGE SETUP
 st.set_page_config(layout="wide", page_title="Income Distribution Dashboard")
 
-# --- CONFIGURATION ---
-POP_FILENAME = "API_SP.POP.TOTL_DS2_en_csv_v2_246068.csv"
-MAIN_FILENAME = "dashboard_data.csv"
+# --- CONFIGURATION & PATHS ---
+# Define the data folder relative to app.py
+DATA_FOLDER = "data"
 
-# --- UPDATED NAMING CONVENTION ---
-# Renamed Model 1 to "Global Fixed Slope"
+# Join paths securely so they work on Mac (local) and Linux (Streamlit Cloud)
+POP_FILENAME = os.path.join(DATA_FOLDER, "API_SP.POP.TOTL_DS2_en_csv_v2_246068.csv")
+MAIN_FILENAME = os.path.join(DATA_FOLDER, "dashboard_data.csv")
+PATH_LMICS = os.path.join(DATA_FOLDER, "CLASS_2025_10_07.xlsx")
+PATH_MAPPING = os.path.join(DATA_FOLDER, "WB_country_iso3_mapping.xls")
+
+# Shapefile Path (pointing to the folder moved inside 'data')
+PATH_SHAPEFILE = os.path.join(
+    DATA_FOLDER, "ne_110m_admin_0_countries", "ne_110m_admin_0_countries.shp"
+)
+
+# --- NAMING CONVENTION ---
 MODEL_CONFIG = {
-    "r2_simulated": {
-        "pred_col": "simulated_daily_consumption",
-        "name": "0. Simulated",
-    },
-    "r2_m1_global": {
-        "pred_col": "pred_m1_global",
-        "name": "1. Global Fixed Slope",
-    },
+    "r2_simulated": {"pred_col": "simulated_daily_consumption", "name": "0. Simulated"},
+    "r2_m1_global": {"pred_col": "pred_m1_global", "name": "1. Global Fixed Slope"},
     "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
     "r2_m3_cntry": {"pred_col": "pred_m3_cntry", "name": "3. Country-Specific Trends"},
     "r2_m4_linear": {"pred_col": "pred_m4_linear", "name": "4. Survey Fit (Linear)"},
@@ -34,34 +38,32 @@ MODEL_CONFIG = {
     "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Fit (Quartic)"},
 }
 
-# --- CONSISTENT COLOR PALETTE ---
-# Updated key for Model 1 to match new name
 COLOR_PALETTE = {
-    "0. Simulated": "#E31A1C",  # Red
-    "1. Global Fixed Slope": "#1F78B4",  # Dark Blue (Key Updated)
-    "2. Gini Interaction": "#A6CEE3",  # Light Blue
-    "3. Country-Specific Trends": "#33A02C",  # Dark Green
-    "4. Survey Fit (Linear)": "#B2DF8A",  # Light Green
-    "5. Survey Fit (Quadratic)": "#6A3D9A",  # Purple
-    "6. Survey Fit (Cubic)": "#FDBF6F",  # Light Orange
-    "7. Survey Fit (Quartic)": "#FF7F00",  # Dark Orange
-    "TRUE INCOME": "#FFD700",  # Gold (Yellow)
-    "None": "#999999",  # Grey
+    "0. Simulated": "#E31A1C",
+    "1. Global Fixed Slope": "#1F78B4",
+    "2. Gini Interaction": "#A6CEE3",
+    "3. Country-Specific Trends": "#33A02C",
+    "4. Survey Fit (Linear)": "#B2DF8A",
+    "5. Survey Fit (Quadratic)": "#6A3D9A",
+    "6. Survey Fit (Cubic)": "#FDBF6F",
+    "7. Survey Fit (Quartic)": "#FF7F00",
+    "TRUE INCOME": "#FFD700",
+    "None": "#999999",
 }
 
-# Standard logical sort order (0-7) for legends and the big scroll chart
-MODEL_LOGICAL_ORDER = [config["name"] for config in MODEL_CONFIG.values()]
-MODEL_LOGICAL_ORDER.append("TRUE INCOME")
-MODEL_LOGICAL_ORDER.append("None")
+MODEL_LOGICAL_ORDER = [config["name"] for config in MODEL_CONFIG.values()] + [
+    "TRUE INCOME",
+    "None",
+]
 
-# --- INIT SESSION STATE FOR LOGGING ---
 if "change_log" not in st.session_state:
     st.session_state.change_log = []
 
+# 2. LOAD DATA FUNCTIONS
 
-# 2. LOAD & MERGE DATA
+
 @st.cache_data
-def load_data():
+def load_main_data():
     try:
         df = pd.read_csv(MAIN_FILENAME, sep=None, engine="python")
         df.columns = df.columns.str.strip().str.lower()
@@ -71,14 +73,17 @@ def load_data():
         df["survey_id"] = df["iso3"] + "_" + df["year"].astype(str)
     except Exception as e:
         st.error(f"Error reading {MAIN_FILENAME}: {e}")
-        return None
+        return None, None
 
+    # Load Pop for Merging
     if os.path.exists(POP_FILENAME):
         try:
             pop_raw = pd.read_csv(POP_FILENAME, skiprows=4)
             year_cols = [c for c in pop_raw.columns if c.isdigit()]
             keep_cols = ["Country Code"] + year_cols
             pop_subset = pop_raw[keep_cols].copy()
+
+            # For Main DF (Long Format)
             pop_long = pop_subset.melt(
                 id_vars=["Country Code"],
                 value_vars=year_cols,
@@ -88,16 +93,61 @@ def load_data():
             pop_long.rename(columns={"Country Code": "iso3"}, inplace=True)
             pop_long["year"] = pd.to_numeric(pop_long["year"], errors="coerce")
             df = pd.merge(df, pop_long, on=["iso3", "year"], how="left")
+
+            return df, pop_raw  # Return raw pop for map usage
         except Exception as e:
             st.warning(f"⚠️ Could not process population file: {e}")
             df["population"] = 0
+            return df, None
     else:
         st.warning(f"⚠️ Population file not found.")
         df["population"] = 0
-    return df
+        return df, None
 
 
-raw_df = load_data()
+# Load Map Geospatial Data
+@st.cache_data
+def load_map_resources():
+    try:
+        # 1. LMIC Data
+        df_lmic = pd.read_excel(PATH_LMICS)
+        df_lmic = df_lmic[df_lmic["Income group"] != "High income"]
+        lmic_isos = set(df_lmic["Code"].astype(str).str.strip().str.upper())
+
+        # 2. Shapefile
+        # Check if shapefile actually exists at the relative path before loading
+        if not os.path.exists(PATH_SHAPEFILE):
+            return None, None, f"Shapefile not found at: {PATH_SHAPEFILE}"
+
+        gdf_admin0 = gpd.read_file(PATH_SHAPEFILE)
+
+        # Convert to EPSG:4326 (Lat/Lon)
+        if gdf_admin0.crs != "EPSG:4326":
+            gdf_admin0 = gdf_admin0.to_crs(epsg=4326)
+
+        # Simplify geometry significantly for web rendering speed
+        gdf_admin0["geometry"] = gdf_admin0.simplify(0.05, preserve_topology=True)
+        gdf_admin0 = gdf_admin0.rename(columns={"ISO_A3": "iso3"})
+
+        # 3. Country Names Mapping
+        df_names = pd.read_excel(PATH_MAPPING)
+        if "country" in df_names.columns and "iso3" in df_names.columns:
+            df_names = df_names[["iso3", "country"]].rename(
+                columns={"country": "country_name"}
+            )
+        else:
+            # Fallback
+            df_names.columns = [c.lower() for c in df_names.columns]
+            df_names = df_names[["iso3", "country"]].rename(
+                columns={"country": "country_name"}
+            )
+
+        return lmic_isos, gdf_admin0, df_names
+    except Exception as e:
+        return None, None, str(e)
+
+
+raw_df, raw_pop_df = load_main_data()
 if raw_df is None:
     st.stop()
 
@@ -144,10 +194,9 @@ def calculate_dynamic_stats(data_subset, log_y=False):
     return pd.DataFrame(results)
 
 
-# 4. SIDEBAR CONTROLS & PARAMS CAPTURE
+# 4. SIDEBAR CONTROLS
 st.sidebar.markdown("## ⚙️ Settings")
 
-# --- INPUTS ---
 scale_mode = st.sidebar.radio(
     "Select Analysis Scale", options=["Linear", "Log-Log", "Log-Linear"], index=2
 )
@@ -167,7 +216,6 @@ default_range = (1, 80)
 min_p, max_p = st.sidebar.slider("Percentile Range", 0, 100, default_range, 1)
 
 if is_log_x and min_p == 0:
-    st.sidebar.warning("⚠️ Log-Log scale requires Percentile > 0.")
     min_p = 1
 
 # --- FILTERING LOGIC ---
@@ -176,39 +224,18 @@ if min_pop_val > 0:
     mask = mask & (raw_df["population"].fillna(0) >= min_pop_val)
 filtered_df = raw_df[mask].copy()
 
-# --- EXCLUDED SURVEYS LIST ---
-all_surveys = set(raw_df["survey_id"].unique())
-kept_surveys = (
-    set(filtered_df["survey_id"].unique()) if not filtered_df.empty else set()
-)
-excluded_surveys = sorted(list(all_surveys - kept_surveys))
-
-if excluded_surveys:
-    st.sidebar.markdown("---")
-    with st.sidebar.expander(f"❌ Excluded Surveys ({len(excluded_surveys)})"):
-
-        def format_survey_label(s_id):
-            try:
-                parts = s_id.split("_")
-                return f"{parts[0]} ({parts[1]})"
-            except:
-                return s_id
-
-        formatted_list = [format_survey_label(s) for s in excluded_surveys]
-        st.write(", ".join(formatted_list))
-else:
-    if not filtered_df.empty:
-        st.sidebar.caption("✅ No surveys excluded by filters.")
-
-if filtered_df.empty:
-    st.error("❌ No data found with current filters.")
-    st.stop()
-
 unique_surveys = filtered_df["survey_id"].nunique()
-st.sidebar.caption(f"Surveys Included: **{unique_surveys}**")
 
+# --- EXCLUDED SURVEYS LIST ---
+all_survey_ids = set(raw_df["survey_id"].unique())
+kept_survey_ids = set(filtered_df["survey_id"].unique())
+excluded_ids = sorted(list(all_survey_ids - kept_survey_ids))
 
-# --- Quality Thresholds ---
+if excluded_ids:
+    with st.sidebar.expander(f"❌ Excluded Surveys ({len(excluded_ids)})"):
+        st.caption(f"Filtered out (Pop < {min_pop_mil}M or Empty Range)")
+        st.write(", ".join(excluded_ids))
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Quality Thresholds**")
 c_low, c_high = st.sidebar.columns(2)
@@ -217,19 +244,15 @@ with c_low:
 with c_high:
     thresh_high = st.number_input("High >", 0.0, 1.0, 0.90, 0.05)
 
-
 # --- CALCULATIONS ---
 survey_stats = calculate_dynamic_stats(filtered_df, log_y=is_log_y)
-
 r2_cols = list(MODEL_CONFIG.keys())
-# Global means
 stats_for_avg = survey_stats[r2_cols].replace(-999.0, np.nan)
 global_means = stats_for_avg.mean().reset_index()
 global_means.columns = ["model_key", "mean_r2"]
 global_means["Model"] = global_means["model_key"].map(lambda x: MODEL_CONFIG[x]["name"])
 global_means = global_means.sort_values(by="mean_r2", ascending=False)
 
-# Winners
 survey_stats["best_r2"] = survey_stats[r2_cols].max(axis=1)
 survey_stats["winning_col"] = survey_stats[r2_cols].idxmax(axis=1)
 survey_stats["winning_model"] = survey_stats["winning_col"].map(
@@ -241,10 +264,6 @@ survey_stats = survey_stats[survey_stats["best_r2"] > -100].sort_values(
 
 best_score_map = dict(zip(survey_stats["survey_id"], survey_stats["best_r2"]))
 sorted_survey_list = survey_stats["survey_id"].tolist()
-
-if not sorted_survey_list:
-    st.warning("Not enough data.")
-    st.stop()
 
 # --- PREPARE LOGGING DATA ---
 # 1. Define Labels
@@ -302,7 +321,6 @@ else:
 if should_log:
     deltas = {}
     changes = []
-
     if st.session_state.change_log:
         last = st.session_state.change_log[-1]
         last_res = last["results"]
@@ -332,7 +350,9 @@ if should_log:
 
 # --- PERSISTENT SELECTION ---
 if "last_selected_survey" not in st.session_state:
-    st.session_state.last_selected_survey = sorted_survey_list[0]
+    st.session_state.last_selected_survey = (
+        sorted_survey_list[0] if sorted_survey_list else None
+    )
 
 
 def update_survey_selection():
@@ -341,7 +361,7 @@ def update_survey_selection():
 
 try:
     pre_selected_index = sorted_survey_list.index(st.session_state.last_selected_survey)
-except ValueError:
+except:
     pre_selected_index = 0
 
 
@@ -350,25 +370,22 @@ def format_func(survey_id):
     return f"{survey_id} (R²: {score:.2f})"
 
 
-# ==========================================
-# SIDEBAR: SURVEY SELECTION
-# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Select Survey**")
+if sorted_survey_list:
+    selected_survey = st.sidebar.selectbox(
+        "Select Survey",
+        options=sorted_survey_list,
+        format_func=format_func,
+        index=pre_selected_index,
+        key="survey_widget",
+        on_change=update_survey_selection,
+        label_visibility="collapsed",
+    )
+else:
+    st.sidebar.error("No surveys available.")
 
-selected_survey = st.sidebar.selectbox(
-    "Select Survey",
-    options=sorted_survey_list,
-    format_func=format_func,
-    index=pre_selected_index,
-    key="survey_widget",
-    on_change=update_survey_selection,
-    label_visibility="collapsed",
-)
-
-# --- SIDEBAR: GLOBAL AVERAGES ---
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"### 🌍 Global Average R²")
 st.sidebar.dataframe(
     global_means[["Model", "mean_r2"]]
     .style.background_gradient(subset=["mean_r2"], cmap="Greens")
@@ -384,12 +401,13 @@ tab_options = [
     "📈 Chart Visualization",
     "📊 Model Analysis",
     "🌍 Survey Scatter",
+    "🗺️ Coverage Map",
     "📝 Model Equations",
     "📜 Change Log",
 ]
 
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "🌍 Survey Scatter"
+    st.session_state.active_tab = "🗺️ Coverage Map"
 
 selected_tab = st.radio(
     "Select View",
@@ -399,6 +417,71 @@ selected_tab = st.radio(
     key="active_tab",
 )
 st.markdown("---")
+
+
+# ==========================================
+# MAP LOGIC (Shapefile Version)
+# ==========================================
+def get_map_dataframe(
+    pop_threshold, lmic_isos, gdf_admin0, df_names, raw_pop_df, cons_df
+):
+    # 1. Get Consumption ISOs
+    cons_isos = set(cons_df["iso3"].astype(str).str.strip().str.upper())
+
+    # 2. Prepare Pop Data
+    year_cols = [c for c in raw_pop_df.columns if c.isdigit()]
+    latest_year = year_cols[-1]
+    df_pop = raw_pop_df[["Country Code", latest_year]].copy()
+    df_pop.columns = ["iso3", "population"]
+
+    # 3. Create DataFrame
+    # Use the shapefile (gdf_admin0) as the base
+    gdf_map = gdf_admin0.copy()
+    if "population" in gdf_map.columns:
+        gdf_map = gdf_map.drop(columns=["population"])
+    if "country_name" in gdf_map.columns:
+        gdf_map = gdf_map.drop(columns=["country_name"])
+
+    gdf_map = gdf_map.merge(df_pop, on="iso3", how="left")
+    gdf_map = gdf_map.merge(df_names, on="iso3", how="left")
+    gdf_map["country_name"] = gdf_map["country_name"].fillna(gdf_map["iso3"])
+
+    # 4. Categorization Logic
+    def get_status(row):
+        iso = str(row["iso3"]).strip().upper() if row["iso3"] else ""
+        in_lmic = iso in lmic_isos
+        in_cons = iso in cons_isos
+        pop = row["population"] if pd.notnull(row["population"]) else 0
+        is_small = pop < pop_threshold
+
+        if not in_lmic and not in_cons:
+            return "Excluded (High Income)"
+
+        # Priority Logic
+        if in_lmic:
+            if in_cons:
+                if is_small:
+                    return "Excluded (Small Pop)"  # Small but has data
+                return "Covered (Standard)"  # Standard coverage
+            else:
+                return "Missing Data (LMIC)"  # LMIC but no data
+
+        # Not LMIC but in Consumption (Rare)
+        return "Non-LMIC with Data"
+
+    gdf_map["Status"] = gdf_map.apply(get_status, axis=1)
+
+    # Calculate Stats
+    lmic_mask = gdf_map["iso3"].apply(lambda x: str(x).upper() in lmic_isos)
+    total_lmic_pop = gdf_map.loc[lmic_mask, "population"].sum()
+
+    valid_mask = gdf_map["Status"] == "Covered (Standard)"
+    covered_valid_pop = gdf_map.loc[valid_mask, "population"].sum()
+
+    pct = (covered_valid_pop / total_lmic_pop * 100) if total_lmic_pop > 0 else 0
+
+    return gdf_map, pct, covered_valid_pop, total_lmic_pop
+
 
 # --- VIEW 1: CHART ---
 if selected_tab == "📈 Chart Visualization":
@@ -453,14 +536,13 @@ if selected_tab == "📈 Chart Visualization":
 
     plot_df["Prediction"] = plot_df["Prediction"].round(2)
 
-    # --- CHART: Use Consistent Colors & Logical Order ---
     fig = px.line(
         plot_df,
         x="percentile",
         y="Prediction",
         color="Model",
         color_discrete_map=COLOR_PALETTE,
-        category_orders={"Model": MODEL_LOGICAL_ORDER},  # Logical 0-7 order
+        category_orders={"Model": MODEL_LOGICAL_ORDER},
         height=600,
         labels={"percentile": x_axis_label, "Prediction": y_axis_label},
     )
@@ -488,12 +570,9 @@ if selected_tab == "📈 Chart Visualization":
 # --- VIEW 2: MODEL ANALYSIS ---
 elif selected_tab == "📊 Model Analysis":
     st.markdown(f"### Winning Models Distribution ({scale_mode})")
-
     win_counts = survey_stats["winning_model"].value_counts().reset_index()
     win_counts.columns = ["Model", "Count"]
     win_counts["Percentage"] = (win_counts["Count"] / win_counts["Count"].sum()) * 100
-
-    # SORTING: Percent High -> Low (Left to Right)
     win_counts = win_counts.sort_values(by="Percentage", ascending=False)
     sorted_models_by_count = win_counts["Model"].tolist()
 
@@ -503,8 +582,8 @@ elif selected_tab == "📊 Model Analysis":
         y="Percentage",
         text_auto=".2f",
         color="Model",
-        color_discrete_map=COLOR_PALETTE,  # Keeps colors consistent despite new order
-        category_orders={"Model": sorted_models_by_count},  # Forces sorting by %
+        color_discrete_map=COLOR_PALETTE,
+        category_orders={"Model": sorted_models_by_count},
     )
     fig_bar.update_layout(yaxis_title="Percentage Won (%)", showlegend=True)
     fig_bar.update_traces(texttemplate="%{y:.2f}%", textposition="outside")
@@ -530,15 +609,13 @@ elif selected_tab == "📊 Model Analysis":
 
     total_width = max(1000, len(chart_df) * 15)
 
-    st.caption(f"Displaying **{len(chart_df)}** surveys. Scroll right to see more ->")
-
     fig_scroll = px.bar(
         chart_df,
         x="rank_index",
         y="visual_r2",
         color="winning_model",
         color_discrete_map=COLOR_PALETTE,
-        category_orders={"winning_model": MODEL_LOGICAL_ORDER},  # Legend stays 0-7
+        category_orders={"winning_model": MODEL_LOGICAL_ORDER},
         hover_name="survey_id",
         hover_data={"best_r2": ":.3f", "visual_r2": False, "rank_index": False},
         width=total_width,
@@ -553,15 +630,12 @@ elif selected_tab == "📊 Model Analysis":
         legend_title="Winning Model",
         margin=dict(l=50, r=50, t=50, b=50),
     )
-
     fig_scroll.update_traces(textposition="outside")
     st.plotly_chart(fig_scroll, use_container_width=False)
-
 
 # --- VIEW 3: SCATTER OVERVIEW ---
 elif selected_tab == "🌍 Survey Scatter":
     st.markdown("### 🌍 Global Performance Overview")
-
     survey_meta = filtered_df[
         ["survey_id", "iso3", "year", "gdp_pcap", "gini_disp", "population"]
     ].drop_duplicates()
@@ -577,7 +651,6 @@ elif selected_tab == "🌍 Survey Scatter":
     col_t1, col_t2 = st.columns([1, 4])
     with col_t1:
         use_pop_size = st.checkbox("Size by Pop?", value=False)
-
     size_col = "pop_m" if use_pop_size else None
     size_max_val = 15 if use_pop_size else None
 
@@ -590,12 +663,7 @@ elif selected_tab == "🌍 Survey Scatter":
         hover_name="survey_id",
         size=size_col,
         size_max=size_max_val,
-        hover_data={
-            "best_r2": ":.3f",
-            "winning_model": True,
-            "Quality": False,
-            "gdp_pcap": ":,.0f",
-        },
+        hover_data={"best_r2": ":.3f", "winning_model": True, "Quality": False},
         height=500,
         title=f"Model Accuracy vs. Economic Indicators",
     )
@@ -606,13 +674,11 @@ elif selected_tab == "🌍 Survey Scatter":
 
     st.markdown("---")
     st.markdown("### 📊 Fit Quality Distribution")
-
     quality_counts = scatter_df["Quality"].value_counts().reset_index()
     quality_counts.columns = ["Quality", "Count"]
     quality_counts["Percentage"] = (
         quality_counts["Count"] / quality_counts["Count"].sum()
     ) * 100
-
     cat_order = [label_high, label_med, label_low]
 
     fig_bar_qual = px.bar(
@@ -632,189 +698,225 @@ elif selected_tab == "🌍 Survey Scatter":
     fig_bar_qual.update_traces(texttemplate="%{y} <br>(%{customdata[0]:.1f}%)")
     st.plotly_chart(fig_bar_qual, use_container_width=True)
 
-# --- VIEW 4: MODEL EQUATIONS ---
+# --- VIEW 4: MAP (SHAPEFILE VERSION) ---
+elif selected_tab == "🗺️ Coverage Map":
+    st.markdown("### 🗺️ Data Coverage Map")
+    st.caption(
+        f"Small countries (< {min_pop_mil}M) are shown in **Grey/Yellow** to distinguish them from full coverage."
+    )
+
+    lmic_isos, gdf_admin0, df_names = load_map_resources()
+
+    if lmic_isos is None:
+        st.error(f"❌ Failed to load map resources. Error: {df_names}")
+    else:
+        with st.spinner("Generating Map..."):
+            gdf_map, pct, pop_cov, pop_tot = get_map_dataframe(
+                min_pop_val, lmic_isos, gdf_admin0, df_names, raw_pop_df, raw_df
+            )
+
+            # KPI Cards
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Coverage (Pop)", f"{pct:.1f}%")
+            k2.metric("Covered People", f"{pop_cov/1e9:.2f}B")
+            k3.metric("Total LMIC Pop", f"{pop_tot/1e9:.2f}B")
+
+            # Map Colors
+            color_map = {
+                "Covered (Standard)": "#2ca02c",  # Green
+                "Excluded (Small Pop)": "#ffd700",  # Gold (Distinction for Small)
+                "Missing Data (LMIC)": "#d62728",  # Red
+                "Non-LMIC with Data": "#1f77b4",  # Blue
+                "Excluded (High Income)": "#eeeeee",  # Light Grey
+            }
+
+            fig_map = px.choropleth(
+                gdf_map,
+                geojson=gdf_map.geometry,
+                locations=gdf_map.index,
+                color="Status",
+                color_discrete_map=color_map,
+                hover_name="country_name",
+                hover_data={"population": ":,.0f", "iso3": True},
+                projection="natural earth",
+                title="Global Coverage Status",
+            )
+            fig_map.update_geos(fitbounds="locations", visible=False)
+            fig_map.update_layout(
+                height=600,
+                margin={"r": 0, "t": 30, "l": 0, "b": 0},
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            )
+            st.plotly_chart(fig_map, use_container_width=True)
+
+# --- VIEW 5: MODEL EQUATIONS ---
 elif selected_tab == "📝 Model Equations":
     st.markdown("### 📝 Model Specifications")
     st.write(
-        "Below are the equations corresponding to the R `fixest` regressions and their Stata equivalents."
+        "Below are the equations and R code (`fixest` package) for all models used in the analysis."
     )
 
-    # --- SETUP NOTATION ---
+    # Notation Block
     st.info(
-        "ℹ️ **Notation:** Subscripts denote **p**ercentile ($p$), **c**ountry ($c$), and **y**ear ($y$)."
+        "ℹ️ **Notation:** $Y_{p,c,y}$ = Consumption, $P$ = Percentile Rank. Subscripts: $p$ (percentile), $c$ (country), $y$ (year)."
     )
 
     if scale_mode == "Linear":
-        st.markdown(
-            r"**Definitions:** $Y = \text{Consumption}$, $P = \text{Percentile Rank (1-100)}$."
-        )
         Y_term = "Y_{p,c,y}"
         P_term = "P"
     elif scale_mode == "Log-Log":
-        st.markdown(
-            r"**Definitions:** $Y = \ln(\text{Consumption})$, $P = \ln(\text{Percentile Rank})$."
-        )
         Y_term = r"\ln(Y_{p,c,y})"
         P_term = r"\ln(P)"
     elif scale_mode == "Log-Linear":
-        st.markdown(
-            r"**Definitions:** $Y = \ln(\text{Consumption})$, $P = \text{Percentile Rank (1-100)}$."
-        )
         Y_term = r"\ln(Y_{p,c,y})"
         P_term = "P"
 
+    # --- MODEL 0: SIMULATED ---
     st.markdown("---")
-
-    # --- MODEL 1 ---
-    st.subheader("1. Global Fixed Slope")
-    st.markdown("_GDP sets the level; one global slope for the percentile._")
-
+    st.subheader("0. Simulated")
     c1, c2 = st.columns([1, 1])
     with c1:
-        st.markdown(
-            r"**Math:** $$ "
-            + Y_term
+        st.markdown(r"**Log-Normal Simulation:**")
+        st.latex(r"Y \sim \text{LogNormal}(\mu_{c,y}, \sigma_{c,y})")
+    with c2:
+        st.markdown("**Description:**")
+        st.write(
+            "Consumption is simulated using a Log-Normal distribution derived from summary statistics (Mean and Gini) rather than regression."
+        )
+
+    # --- MODEL 1: GLOBAL FIXED SLOPE ---
+    st.markdown("---")
+    st.subheader("1. Global Fixed Slope")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.latex(
+            Y_term
             + r" = \beta_0 + \beta_1 \text{GDP}_{c,y} + \beta_2 "
             + P_term
-            + r" + \epsilon $$"
+            + r" + \epsilon"
         )
     with c2:
-        st.markdown("**R Code (`fixest`):**")
         st.code("feols(Y ~ gdp + pct, cluster = ~iso3)", language="r")
-        st.markdown("**Stata:**")
-        st.code("reg Y gdp pct, vce(cluster iso3)", language="stata")
 
-    st.divider()
-
-    # --- MODEL 2 ---
+    # --- MODEL 2: GINI INTERACTION ---
+    st.markdown("---")
     st.subheader("2. Gini Interaction")
-    st.markdown("_GDP and Gini set the level; Gini shapes the percentile slope._")
-
-    c1, c2 = st.columns([1, 1])
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown(
-            r"**Math:** $$ "
-            + Y_term
-            + r" = \beta_0 + \beta_1 \text{GDP}_{c,y} + \beta_2 \text{Gini}_{c,y} + \beta_3 ("
+        st.latex(
+            Y_term
+            + r" = \beta_0 + \beta_1 \text{GDP} + \beta_2 \text{Gini} + \beta_3 ("
             + P_term
-            + r" \times \text{Gini}_{c,y}) + \epsilon $$"
+            + r" \times \text{Gini}) + \epsilon"
         )
     with c2:
-        st.markdown("**R Code (`fixest`):**")
         st.code("feols(Y ~ gdp + gini + pct * gini, cluster=~iso3)", language="r")
-        st.markdown("**Stata:**")
-        st.code("reg Y gdp gini c.pct##c.gini, vce(cluster iso3)", language="stata")
 
-    st.divider()
-
-    # --- MODEL 3 ---
+    # --- MODEL 3: COUNTRY SPECIFIC ---
+    st.markdown("---")
     st.subheader("3. Country-Specific Trends")
-    st.markdown(
-        "_GDP and Country Fixed Effects set the level; Country FEs determine specific slopes._"
-    )
-
-    c1, c2 = st.columns([1, 1])
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown(
-            r"**Math:** $$ "
-            + Y_term
-            + r" = \alpha_c + \beta_1 \text{GDP}_{c,y} + \beta_{2,c} "
+        st.latex(
+            Y_term
+            + r" = \alpha_c + \beta_1 \text{GDP} + \beta_{2,c} "
             + P_term
-            + r" + \epsilon $$"
-        )
-        st.caption(
-            r"Where $\alpha_c$ is the country intercept and $\beta_{2,c}$ is the country-specific slope."
+            + r" + \epsilon"
         )
     with c2:
-        st.markdown("**R Code (`fixest`):**")
         st.code("feols(Y ~ gdp | iso3[pct])", language="r")
-        st.markdown("**Stata:**")
-        st.code("reg Y gdp i.iso3##c.pct, vce(cluster iso3)", language="stata")
 
-    st.divider()
-
-    # --- MODEL 4-7 ---
-    st.subheader("4 - 7. Survey-Specific Fits (Polynomials)")
-    st.markdown(
-        "_The survey (Country-Year) Fixed Effect sets the level; the interaction fits a unique curve to every survey._"
-    )
-
-    st.markdown(
-        r"**Math:** $$ "
-        + Y_term
-        + r" = \alpha_{c,y} + \sum_{k=1}^{K} \beta_{k,c,y} ("
-        + P_term
-        + r")^k + \epsilon $$"
-    )
-    st.caption(
-        "Every survey (Country-Year) gets its own intercept and slope(s). $K$ determines flexibility (Linear to Quartic)."
-    )
-
-    c1, c2 = st.columns([1, 1])
+    # --- MODEL 4: LINEAR ---
+    st.markdown("---")
+    st.subheader("4. Survey Fit (Linear)")
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**R Code (General):**")
-        st.code(
-            """
-# K=1 (Linear Trend per Survey)
-feols(Y ~ 1 | iso3^year[pct])
+        st.latex(Y_term + r" = \beta_0 + \beta_1 " + P_term + r" + \epsilon")
+    with c2:
+        st.code("lm(Y ~ pct)", language="r")
 
-# K=4 (Quartic Trend per Survey)
-feols(Y ~ 1 | iso3^year[pct + pct^2 + pct^3 + pct^4])
-        """,
-            language="r",
+    # --- MODEL 5: QUADRATIC ---
+    st.markdown("---")
+    st.subheader("5. Survey Fit (Quadratic)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.latex(
+            Y_term
+            + r" = \beta_0 + \beta_1 "
+            + P_term
+            + r" + \beta_2 "
+            + P_term
+            + r"^2 + \epsilon"
         )
     with c2:
-        st.markdown("**Stata (`reghdfe` package):**")
-        st.code(
-            """
-# Absorbing the interaction of
-# Country-Year and Percentile
-reghdfe Y, absorb(iso3#year##c.pct)
-        """,
-            language="stata",
-        )
+        st.code("lm(Y ~ poly(pct, 2))", language="r")
 
-# --- VIEW 5: CHANGE LOG ---
+    # --- MODEL 6: CUBIC ---
+    st.markdown("---")
+    st.subheader("6. Survey Fit (Cubic)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.latex(
+            Y_term
+            + r" = \beta_0 + \beta_1 "
+            + P_term
+            + r" + \beta_2 "
+            + P_term
+            + r"^2 + \beta_3 "
+            + P_term
+            + r"^3 + \epsilon"
+        )
+    with c2:
+        st.code("lm(Y ~ poly(pct, 3))", language="r")
+
+    # --- MODEL 7: QUARTIC ---
+    st.markdown("---")
+    st.subheader("7. Survey Fit (Quartic)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.latex(
+            Y_term
+            + r" = \beta_0 + \sum_{k=1}^{4} \beta_k ("
+            + P_term
+            + r")^k + \epsilon"
+        )
+    with c2:
+        st.code("lm(Y ~ poly(pct, 4))", language="r")
+
+
+# --- VIEW 6: CHANGE LOG ---
 elif selected_tab == "📜 Change Log":
     st.markdown("### 📜 Session History")
-    st.caption(
-        "Tracks how your global statistics change as you modify settings (Population, Thresholds, Scale, etc)."
-    )
-
     if not st.session_state.change_log:
         st.info("No changes recorded yet.")
     else:
-        # Show newest first
         for i, entry in enumerate(reversed(st.session_state.change_log)):
             res = entry["results"]
             delta = entry["deltas"]
-            params = entry["params"]
-
-            def get_delta(val):
-                return val if val != 0 else None
-
             with st.container():
                 st.markdown(f"#### Step {entry['id']}: {entry['changes_txt']}")
-
                 c1, c2, c3, c4 = st.columns(4)
-
                 c1.metric(
-                    "Surveys", res["n_surveys"], delta=get_delta(delta["n_surveys"])
+                    "Surveys",
+                    res["n_surveys"],
+                    delta=delta["n_surveys"] if delta["n_surveys"] != 0 else None,
                 )
                 c2.metric(
                     f"🟢 {res['label_high']}",
                     res["high"],
-                    delta=get_delta(delta["high"]),
+                    delta=delta["high"] if delta["high"] != 0 else None,
                 )
                 c3.metric(
-                    f"🟡 {res['label_med']}", res["med"], delta=get_delta(delta["med"])
+                    f"🟡 {res['label_med']}",
+                    res["med"],
+                    delta=delta["med"] if delta["med"] != 0 else None,
                 )
                 c4.metric(
-                    f"🔴 {res['label_low']}", res["low"], delta=get_delta(delta["low"])
+                    f"🔴 {res['label_low']}",
+                    res["low"],
+                    delta=delta["low"] if delta["low"] != 0 else None,
                 )
-
                 st.divider()
-
         if st.button("Clear Log"):
             st.session_state.change_log = []
             st.rerun()
