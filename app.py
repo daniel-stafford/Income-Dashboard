@@ -462,7 +462,7 @@ def get_map_dataframe(
             if in_cons:
                 if is_small:
                     return "Excluded (Small Pop)"  # Small but has data
-                return "Covered (Standard)"  # Standard coverage
+                return "Covered (Data and LMIC)"  # Standard coverage
             else:
                 return "Missing Data (LMIC)"  # LMIC but no data
 
@@ -475,7 +475,7 @@ def get_map_dataframe(
     lmic_mask = gdf_map["iso3"].apply(lambda x: str(x).upper() in lmic_isos)
     total_lmic_pop = gdf_map.loc[lmic_mask, "population"].sum()
 
-    valid_mask = gdf_map["Status"] == "Covered (Standard)"
+    valid_mask = gdf_map["Status"] == "Covered (Data and LMIC)"
     covered_valid_pop = gdf_map.loc[valid_mask, "population"].sum()
 
     pct = (covered_valid_pop / total_lmic_pop * 100) if total_lmic_pop > 0 else 0
@@ -723,7 +723,7 @@ elif selected_tab == "🗺️ Coverage Map":
 
             # Map Colors
             color_map = {
-                "Covered (Standard)": "#2ca02c",  # Green
+                "Covered (Data and LMIC)": "#2ca02c",  # Green
                 "Excluded (Small Pop)": "#ffd700",  # Gold (Distinction for Small)
                 "Missing Data (LMIC)": "#d62728",  # Red
                 "Non-LMIC with Data": "#1f77b4",  # Blue
