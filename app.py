@@ -407,7 +407,7 @@ tab_options = [
 ]
 
 if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "🗺️ Coverage Map"
+    st.session_state.active_tab = "🌍 Survey Scatter"
 
 selected_tab = st.radio(
     "Select View",
@@ -634,20 +634,27 @@ elif selected_tab == "📊 Model Analysis":
     st.plotly_chart(fig_scroll, use_container_width=False)
 
 # --- VIEW 3: SCATTER OVERVIEW ---
+
 elif selected_tab == "🌍 Survey Scatter":
     st.markdown("### 🌍 Global Performance Overview")
+
+    # 1. Prepare Base Data
     survey_meta = filtered_df[
         ["survey_id", "iso3", "year", "gdp_pcap", "gini_disp", "population"]
     ].drop_duplicates()
     scatter_df = pd.merge(survey_stats, survey_meta, on="survey_id", how="inner")
     scatter_df["pop_m"] = scatter_df["population"] / 1_000_000
 
-    color_map_scatter = {
+    # Color Maps
+    color_map_qual = {
         label_high: "#28a745",
         label_med: "#ffc107",
         label_low: "#dc3545",
     }
 
+    # ==========================================
+    # 1. MAIN SCATTER PLOT
+    # ==========================================
     col_t1, col_t2 = st.columns([1, 4])
     with col_t1:
         use_pop_size = st.checkbox("Size by Pop?", value=False)
@@ -659,7 +666,7 @@ elif selected_tab == "🌍 Survey Scatter":
         x="gdp_pcap",
         y="gini_disp",
         color="Quality",
-        color_discrete_map=color_map_scatter,
+        color_discrete_map=color_map_qual,
         hover_name="survey_id",
         size=size_col,
         size_max=size_max_val,
@@ -673,13 +680,202 @@ elif selected_tab == "🌍 Survey Scatter":
     st.plotly_chart(fig_scatter, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### 📊 Fit Quality Distribution")
+
+    # ==========================================
+    # 2. GROUPED ANALYSIS (The Combo View)
+    # ==========================================
+    st.markdown("### 🔬 Detailed Fit Analysis")
+
+    # --- Binning Logic ---
+    gini_bins = [0, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 200]
+    gini_labels = [
+        "< 25",
+        "25-29",
+        "30-34",
+        "35-39",
+        "40-44",
+        "45-49",
+        "50-54",
+        "55-59",
+        "60-64",
+        "65-69",
+        "> 70",
+    ]
+    scatter_df["gini_group"] = pd.cut(
+        scatter_df["gini_disp"], bins=gini_bins, labels=gini_labels, right=False
+    )
+
+    max_gdp = scatter_df["gdp_pcap"].max()
+    gdp_bins = list(range(0, int(max_gdp) + 5001, 5000))
+    gdp_labels = [f"{int(i/1000)}k-{int((i+5000)/1000)}k" for i in gdp_bins[:-1]]
+    scatter_df["gdp_group"] = pd.cut(
+        scatter_df["gdp_pcap"], bins=gdp_bins, labels=gdp_labels, right=False
+    )
+
+    # --- PLOT 1: Stacked Bar (Proportions) ---
+    def plot_stacked_distribution(group_col, title_label):
+        df_grouped = (
+            scatter_df.groupby([group_col, "Quality"], observed=False)
+            .size()
+            .reset_index(name="Count")
+        )
+        df_totals = (
+            scatter_df.groupby(group_col, observed=False)
+            .size()
+            .reset_index(name="Total")
+        )
+        df_plot = pd.merge(df_grouped, df_totals, on=group_col)
+        df_plot["Percentage"] = (df_plot["Count"] / df_plot["Total"]) * 100
+        df_plot = df_plot[df_plot["Count"] > 0]
+
+        df_plot["Label"] = df_plot.apply(
+            lambda x: f"{x[group_col]}<br>(n={x['Total']})", axis=1
+        )
+
+        fig = px.bar(
+            df_plot,
+            x="Label",
+            y="Percentage",
+            color="Quality",
+            text="Count",
+            color_discrete_map=color_map_qual,
+            category_orders={"Quality": [label_high, label_med, label_low]},
+            title=f"Fit Distribution by {title_label} (Proportions)",
+            height=500,
+        )
+        fig.update_layout(
+            barmode="stack",
+            xaxis_title=title_label,
+            yaxis_title="Percentage (%)",
+            template="plotly_white",
+        )
+        fig.update_traces(textposition="auto", texttemplate="%{text}")
+        return fig
+
+    # --- PLOT 2: Strip Plot (Detailed Dots) ---
+    def plot_detailed_strip(group_col, x_label):
+        counts = scatter_df[group_col].value_counts()
+
+        def fmt_label(val):
+            return f"{val}<br>(n={counts.get(val, 0)})"
+
+        scatter_df[f"{group_col}_label"] = scatter_df[group_col].apply(fmt_label)
+        sorted_cats = [fmt_label(l) for l in scatter_df[group_col].cat.categories]
+
+        fig = px.strip(
+            scatter_df,
+            x=f"{group_col}_label",
+            y="best_r2",
+            color="winning_model",
+            # Standardize colors and legend order
+            color_discrete_map=COLOR_PALETTE,
+            category_orders={
+                f"{group_col}_label": sorted_cats,
+                "winning_model": MODEL_LOGICAL_ORDER,
+            },
+            hover_name="survey_id",
+            hover_data={"iso3": True, "population": ":,.0f"},
+            stripmode="overlay",
+            height=550,
+            title=f"Individual Scores by {x_label}",
+        )
+
+        # Enforce clean 0-1 range (ignoring outliers)
+        fig.update_yaxes(range=[0, 1.02])
+
+        fig.add_hline(y=thresh_high, line_dash="dot", line_color="green", opacity=0.5)
+        fig.add_hline(y=thresh_low, line_dash="dot", line_color="orange", opacity=0.5)
+
+        fig.update_layout(
+            template="plotly_white", xaxis_title=x_label, yaxis_title="Best R² Score"
+        )
+        return fig
+
+    # --- PLOT 3: Heatmap ---
+    def plot_combined_heatmap():
+        heatmap_data = scatter_df.pivot_table(
+            index="gini_group", columns="gdp_group", values="best_r2", aggfunc="mean"
+        )
+        count_data = scatter_df.pivot_table(
+            index="gini_group", columns="gdp_group", values="best_r2", aggfunc="count"
+        ).fillna(0)
+        text_data = count_data.applymap(lambda x: f"n={int(x)}" if x > 0 else "")
+
+        fig = px.imshow(
+            heatmap_data,
+            labels=dict(x="GDP", y="Gini", color="Mean R²"),
+            x=heatmap_data.columns,
+            y=heatmap_data.index,
+            color_continuous_scale="RdYlGn",
+            range_color=[0.5, 1.0],
+            text_auto=False,
+            aspect="auto",
+            height=600,
+            title="Heatmap: Mean R² (Color) & Count (Text)",
+        )
+        fig.update_traces(text=text_data, texttemplate="%{text}")
+        fig.update_layout(template="plotly_white")
+        return fig
+
+    # --- TABS RENDERING ---
+    tab_gini, tab_gdp, tab_matrix = st.tabs(["By Gini", "By GDP", "Combined Grid"])
+
+    # 1. GINI TAB
+    with tab_gini:
+        chart_type_gini = st.radio(
+            "Chart Type:",
+            ["Stacked Bar (Summary)", "Detailed Dots"],
+            key="gini_toggle",
+            horizontal=True,
+        )
+        if chart_type_gini == "Stacked Bar (Summary)":
+            st.plotly_chart(
+                plot_stacked_distribution("gini_group", "Gini Bracket"),
+                use_container_width=True,
+            )
+        else:
+            st.plotly_chart(
+                plot_detailed_strip("gini_group", "Gini Bracket"),
+                use_container_width=True,
+            )
+
+    # 2. GDP TAB
+    with tab_gdp:
+        chart_type_gdp = st.radio(
+            "Chart Type:",
+            ["Stacked Bar (Summary)", "Detailed Dots"],
+            key="gdp_toggle",
+            horizontal=True,
+        )
+        if chart_type_gdp == "Stacked Bar (Summary)":
+            st.plotly_chart(
+                plot_stacked_distribution("gdp_group", "GDP Bracket"),
+                use_container_width=True,
+            )
+        else:
+            st.plotly_chart(
+                plot_detailed_strip("gdp_group", "GDP Bracket"),
+                use_container_width=True,
+            )
+
+    # 3. MATRIX TAB
+    with tab_matrix:
+        st.caption(
+            "Color represents **Average R²**. Text represents **Number of Surveys**."
+        )
+        st.plotly_chart(plot_combined_heatmap(), use_container_width=True)
+
+    st.markdown("---")
+
+    # ==========================================
+    # 3. OVERALL COUNTS
+    # ==========================================
+    st.markdown("### 📊 Overall Fit Quality Distribution")
     quality_counts = scatter_df["Quality"].value_counts().reset_index()
     quality_counts.columns = ["Quality", "Count"]
     quality_counts["Percentage"] = (
         quality_counts["Count"] / quality_counts["Count"].sum()
     ) * 100
-    cat_order = [label_high, label_med, label_low]
 
     fig_bar_qual = px.bar(
         quality_counts,
@@ -687,8 +883,8 @@ elif selected_tab == "🌍 Survey Scatter":
         y="Count",
         color="Quality",
         text_auto=True,
-        color_discrete_map=color_map_scatter,
-        category_orders={"Quality": cat_order},
+        color_discrete_map=color_map_qual,
+        category_orders={"Quality": [label_high, label_med, label_low]},
         hover_data={"Percentage": ":.1f"},
         height=400,
     )
