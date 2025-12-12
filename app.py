@@ -634,7 +634,6 @@ elif selected_tab == "📊 Model Analysis":
     st.plotly_chart(fig_scroll, use_container_width=False)
 
 # --- VIEW 3: SCATTER OVERVIEW ---
-
 elif selected_tab == "🌍 Survey Scatter":
     st.markdown("### 🌍 Global Performance Overview")
 
@@ -712,44 +711,36 @@ elif selected_tab == "🌍 Survey Scatter":
         scatter_df["gdp_pcap"], bins=gdp_bins, labels=gdp_labels, right=False
     )
 
-    # --- PLOT 1: Stacked Bar (Proportions) ---
-    def plot_stacked_distribution(group_col, title_label):
+    # --- PLOT 1: Grouped Bar (Side-by-Side) ---
+    def plot_grouped_distribution(group_col, title_label):
+        # 1. Get Counts
         df_grouped = (
             scatter_df.groupby([group_col, "Quality"], observed=False)
             .size()
             .reset_index(name="Count")
         )
-        df_totals = (
-            scatter_df.groupby(group_col, observed=False)
-            .size()
-            .reset_index(name="Total")
-        )
-        df_plot = pd.merge(df_grouped, df_totals, on=group_col)
-        df_plot["Percentage"] = (df_plot["Count"] / df_plot["Total"]) * 100
-        df_plot = df_plot[df_plot["Count"] > 0]
 
-        df_plot["Label"] = df_plot.apply(
-            lambda x: f"{x[group_col]}<br>(n={x['Total']})", axis=1
-        )
+        # 2. Filter 0s for cleaner chart
+        df_grouped = df_grouped[df_grouped["Count"] > 0]
 
         fig = px.bar(
-            df_plot,
-            x="Label",
-            y="Percentage",
+            df_grouped,
+            x=group_col,
+            y="Count",
             color="Quality",
             text="Count",
             color_discrete_map=color_map_qual,
             category_orders={"Quality": [label_high, label_med, label_low]},
-            title=f"Fit Distribution by {title_label} (Proportions)",
+            title=f"Fit Count by {title_label}",
             height=500,
+            barmode="group",  # SIDE BY SIDE
         )
         fig.update_layout(
-            barmode="stack",
             xaxis_title=title_label,
-            yaxis_title="Percentage (%)",
+            yaxis_title="Number of Surveys",
             template="plotly_white",
         )
-        fig.update_traces(textposition="auto", texttemplate="%{text}")
+        fig.update_traces(textposition="auto")
         return fig
 
     # --- PLOT 2: Strip Plot (Detailed Dots) ---
@@ -767,7 +758,6 @@ elif selected_tab == "🌍 Survey Scatter":
             x=f"{group_col}_label",
             y="best_r2",
             color="winning_model",
-            # Standardize colors and legend order
             color_discrete_map=COLOR_PALETTE,
             category_orders={
                 f"{group_col}_label": sorted_cats,
@@ -780,7 +770,7 @@ elif selected_tab == "🌍 Survey Scatter":
             title=f"Individual Scores by {x_label}",
         )
 
-        # Enforce clean 0-1 range (ignoring outliers)
+        # Focus View
         fig.update_yaxes(range=[0, 1.02])
 
         fig.add_hline(y=thresh_high, line_dash="dot", line_color="green", opacity=0.5)
@@ -791,46 +781,61 @@ elif selected_tab == "🌍 Survey Scatter":
         )
         return fig
 
-    # --- PLOT 3: Heatmap ---
-    def plot_combined_heatmap():
-        heatmap_data = scatter_df.pivot_table(
-            index="gini_group", columns="gdp_group", values="best_r2", aggfunc="mean"
+    # --- PLOT 3: Bubble Heatmap (Size = N) ---
+    def plot_bubble_grid():
+        # 1. Aggregate Data
+        grid_data = (
+            scatter_df.groupby(["gini_group", "gdp_group"], observed=False)
+            .agg(mean_r2=("best_r2", "mean"), count=("best_r2", "count"))
+            .reset_index()
         )
-        count_data = scatter_df.pivot_table(
-            index="gini_group", columns="gdp_group", values="best_r2", aggfunc="count"
-        ).fillna(0)
-        text_data = count_data.applymap(lambda x: f"n={int(x)}" if x > 0 else "")
 
-        fig = px.imshow(
-            heatmap_data,
-            labels=dict(x="GDP", y="Gini", color="Mean R²"),
-            x=heatmap_data.columns,
-            y=heatmap_data.index,
+        # Filter out empty bubbles
+        grid_data = grid_data[grid_data["count"] > 0]
+
+        # 2. Plot Bubble Chart on Grid
+        fig = px.scatter(
+            grid_data,
+            x="gdp_group",
+            y="gini_group",
+            size="count",  # Size by N
+            color="mean_r2",  # Color by Score
             color_continuous_scale="RdYlGn",
             range_color=[0.5, 1.0],
-            text_auto=False,
-            aspect="auto",
+            size_max=40,  # Adjust max bubble size
+            hover_data={"count": True, "mean_r2": ":.2f"},
+            title="Bubble Grid: Size = Survey Count, Color = Mean R²",
             height=600,
-            title="Heatmap: Mean R² (Color) & Count (Text)",
         )
-        fig.update_traces(text=text_data, texttemplate="%{text}")
-        fig.update_layout(template="plotly_white")
+
+        fig.update_layout(
+            template="plotly_white",
+            xaxis_title="GDP Bracket",
+            yaxis_title="Gini Bracket",
+            xaxis=dict(showgrid=True, gridcolor="#eee"),
+            yaxis=dict(showgrid=True, gridcolor="#eee"),
+        )
+        # Add text labels inside bubbles if they are big enough
+        fig.update_traces(text=grid_data["count"], textposition="middle center")
+
         return fig
 
     # --- TABS RENDERING ---
-    tab_gini, tab_gdp, tab_matrix = st.tabs(["By Gini", "By GDP", "Combined Grid"])
+    tab_gini, tab_gdp, tab_matrix = st.tabs(
+        ["By Gini", "By GDP", "Combined Bubble Grid"]
+    )
 
     # 1. GINI TAB
     with tab_gini:
         chart_type_gini = st.radio(
             "Chart Type:",
-            ["Stacked Bar (Summary)", "Detailed Dots"],
+            ["Grouped Bar (Summary)", "Detailed Dots"],
             key="gini_toggle",
             horizontal=True,
         )
-        if chart_type_gini == "Stacked Bar (Summary)":
+        if chart_type_gini == "Grouped Bar (Summary)":
             st.plotly_chart(
-                plot_stacked_distribution("gini_group", "Gini Bracket"),
+                plot_grouped_distribution("gini_group", "Gini Bracket"),
                 use_container_width=True,
             )
         else:
@@ -843,13 +848,13 @@ elif selected_tab == "🌍 Survey Scatter":
     with tab_gdp:
         chart_type_gdp = st.radio(
             "Chart Type:",
-            ["Stacked Bar (Summary)", "Detailed Dots"],
+            ["Grouped Bar (Summary)", "Detailed Dots"],
             key="gdp_toggle",
             horizontal=True,
         )
-        if chart_type_gdp == "Stacked Bar (Summary)":
+        if chart_type_gdp == "Grouped Bar (Summary)":
             st.plotly_chart(
-                plot_stacked_distribution("gdp_group", "GDP Bracket"),
+                plot_grouped_distribution("gdp_group", "GDP Bracket"),
                 use_container_width=True,
             )
         else:
@@ -860,10 +865,8 @@ elif selected_tab == "🌍 Survey Scatter":
 
     # 3. MATRIX TAB
     with tab_matrix:
-        st.caption(
-            "Color represents **Average R²**. Text represents **Number of Surveys**."
-        )
-        st.plotly_chart(plot_combined_heatmap(), use_container_width=True)
+        st.caption("Larger bubbles = More surveys. Green = Better fit.")
+        st.plotly_chart(plot_bubble_grid(), use_container_width=True)
 
     st.markdown("---")
 
