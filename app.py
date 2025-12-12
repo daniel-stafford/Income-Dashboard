@@ -31,8 +31,8 @@ PATH_SHAPEFILE = os.path.join(
     DATA_FOLDER, "ne_110m_admin_0_countries", "ne_110m_admin_0_countries.shp"
 )
 
-# --- NAMING CONVENTION ---
-MODEL_CONFIG = {
+# --- FULL MODEL DEFINITION ---
+FULL_MODEL_CONFIG = {
     "r2_simulated": {"pred_col": "simulated_daily_consumption", "name": "0. Simulated"},
     "r2_m1_global": {"pred_col": "pred_m1_global", "name": "1. Global Fixed Slope"},
     "r2_m2_gini": {"pred_col": "pred_m2_gini", "name": "2. Gini Interaction"},
@@ -44,6 +44,10 @@ MODEL_CONFIG = {
     },
     "r2_m6_cubic": {"pred_col": "pred_m6_cubic", "name": "6. Survey Fit (Cubic)"},
     "r2_m7_quartic": {"pred_col": "pred_m7_quartic", "name": "7. Survey Fit (Quartic)"},
+    "r2_m8_segmented": {
+        "pred_col": "pred_m8_segmented",
+        "name": "8. Segmented (Piecewise)",
+    },
 }
 
 COLOR_PALETTE = {
@@ -55,11 +59,12 @@ COLOR_PALETTE = {
     "5. Survey Fit (Quadratic)": "#6A3D9A",
     "6. Survey Fit (Cubic)": "#FDBF6F",
     "7. Survey Fit (Quartic)": "#FF7F00",
+    "8. Segmented (Piecewise)": "#E7298A",
     "TRUE INCOME": "#FFD700",
     "None": "#999999",
 }
 
-MODEL_LOGICAL_ORDER = [config["name"] for config in MODEL_CONFIG.values()] + [
+FULL_MODEL_LOGICAL_ORDER = [config["name"] for config in FULL_MODEL_CONFIG.values()] + [
     "TRUE INCOME",
     "None",
 ]
@@ -142,47 +147,95 @@ if raw_df is None:
     st.stop()
 
 
-# 3. STATS FUNCTIONS
-def calculate_r2_manual(y_true, y_pred):
+# 3. STATS FUNCTIONS (LOG CALCULATION)
+def calculate_log_metrics(y_true, y_pred):
+    """
+    Calculates R2 and RMSE on the LOG scale.
+    This effectively calculates Log-R2 and Log-RMSE on the fly.
+    """
     try:
-        y_t = np.array(y_true)
-        y_p = np.array(y_pred)
-        mask = ~np.isnan(y_t) & ~np.isnan(y_p)
-        y_t, y_p = y_t[mask], y_p[mask]
-        if len(y_t) < 2:
-            return -999.0
-        ss_res = np.sum((y_t - y_p) ** 2)
-        ss_tot = np.sum((y_t - np.mean(y_t)) ** 2)
-        return 1 - (ss_res / ss_tot) if ss_tot >= 1e-9 else 0.0
+        # 1. Log Transform (with safety floor for tiny/zero values)
+        # Using 1e-5 floor ensures we don't get -inf, though predictions should be positive.
+        y_t_log = np.log(np.maximum(y_true, 1e-5))
+        y_p_log = np.log(np.maximum(y_pred, 1e-5))
+
+        # 2. Mask NaNs
+        mask = ~np.isnan(y_t_log) & ~np.isnan(y_p_log)
+        y_t_log, y_p_log = y_t_log[mask], y_p_log[mask]
+
+        if len(y_t_log) < 2:
+            return -999.0, 999.0
+
+        # 3. R2 Calculation
+        ss_res = np.sum((y_t_log - y_p_log) ** 2)
+        ss_tot = np.sum((y_t_log - np.mean(y_t_log)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot >= 1e-9 else 0.0
+
+        # 4. RMSE Calculation
+        rmse = np.sqrt(np.mean((y_t_log - y_p_log) ** 2))
+
+        return r2, rmse
     except:
-        return -999.0
+        return -999.0, 999.0
 
 
 @st.cache_data
-def calculate_dynamic_stats(data_subset, log_y=False):
+def calculate_dynamic_stats(data_subset, active_config):
+    """
+    Iterates through surveys and calculates metrics using the log-transformed data.
+    """
     results = []
-
-    def safe_log(arr):
-        return np.log(np.maximum(arr, 0.01))
 
     for survey_id, group in data_subset.groupby("survey_id"):
         row = {"survey_id": survey_id}
-        raw_true = group["true_daily_consumption"].values
-        y_true = safe_log(raw_true) if log_y else raw_true
 
-        for model_key, config in MODEL_CONFIG.items():
+        # Raw Dollar Values
+        y_true_dollars = group["true_daily_consumption"].values
+
+        # Only iterate through ACTIVE models
+        for model_key, config in active_config.items():
             if config["pred_col"] in group.columns:
-                raw_pred = group[config["pred_col"]].values
-                y_pred = safe_log(raw_pred) if log_y else raw_pred
-                row[model_key] = calculate_r2_manual(y_true, y_pred)
+                # Raw Dollar Predictions
+                y_pred_dollars = group[config["pred_col"]].values
+
+                # Calculate metrics on LOGS
+                r2_log, rmse_log = calculate_log_metrics(y_true_dollars, y_pred_dollars)
+
+                row[model_key] = r2_log
+                row[f"{model_key}_rmse"] = rmse_log
             else:
                 row[model_key] = -999.0
+                row[f"{model_key}_rmse"] = 999.0
         results.append(row)
     return pd.DataFrame(results)
 
 
 # 4. SIDEBAR CONTROLS
 st.sidebar.markdown("## ⚙️ Settings")
+
+# --- MODEL SELECTION FILTER ---
+st.sidebar.markdown("**Select Models to Include:**")
+available_model_names = [v["name"] for v in FULL_MODEL_CONFIG.values()]
+selected_model_names = st.sidebar.multiselect(
+    "Active Models",
+    options=available_model_names,
+    default=available_model_names,  # All selected by default
+    label_visibility="collapsed",
+)
+
+# Create the ACTIVE configuration based on selection
+ACTIVE_MODEL_CONFIG = {
+    k: v for k, v in FULL_MODEL_CONFIG.items() if v["name"] in selected_model_names
+}
+MODEL_LOGICAL_ORDER = [config["name"] for config in ACTIVE_MODEL_CONFIG.values()] + [
+    "TRUE INCOME",
+    "None",
+]
+if not ACTIVE_MODEL_CONFIG:
+    st.error("Please select at least one model in the sidebar.")
+    st.stop()
+# -----------------------------------
+
 scale_mode = st.sidebar.radio(
     "Select Analysis Scale", options=["Linear", "Log-Log", "Log-Linear"], index=2
 )
@@ -216,22 +269,22 @@ if excluded_ids:
 st.sidebar.markdown("---")
 st.sidebar.markdown("**$R^2$ Quality Thresholds**")
 c_low, c_high = st.sidebar.columns(2)
-# UPDATED: Changed labels to indicate inclusive thresholds
 thresh_low = c_low.number_input("Medium (≥)", 0.0, 1.0, 0.70, 0.05)
 thresh_high = c_high.number_input("High (≥)", 0.0, 1.0, 0.90, 0.05)
 
-# --- CALCULATIONS ---
-survey_stats = calculate_dynamic_stats(filtered_df, log_y=is_log_y)
-r2_cols = list(MODEL_CONFIG.keys())
+# --- CALCULATIONS (Using Active Config) ---
+# Calculate on the fly using the new LOG logic
+survey_stats = calculate_dynamic_stats(filtered_df, ACTIVE_MODEL_CONFIG)
+r2_cols = list(ACTIVE_MODEL_CONFIG.keys())
 
 # 1. Calculate Best Model/Score
 survey_stats["best_r2"] = survey_stats[r2_cols].max(axis=1)
 survey_stats["winning_col"] = survey_stats[r2_cols].idxmax(axis=1)
 survey_stats["winning_model"] = survey_stats["winning_col"].map(
-    lambda x: MODEL_CONFIG[x]["name"] if pd.notnull(x) else "None"
+    lambda x: ACTIVE_MODEL_CONFIG[x]["name"] if pd.notnull(x) else "None"
 )
 
-# 2. Enrich with Meta Data (Gini, GDP, Year, ISO3) for Sorting/Display
+# 2. Enrich with Meta Data
 meta_lookup = filtered_df[
     ["survey_id", "iso3", "year", "gdp_pcap", "gini_disp", "population"]
 ].drop_duplicates()
@@ -241,11 +294,12 @@ survey_stats = survey_stats[survey_stats["best_r2"] > -100].copy()
 # 3. Global Means for Sidebar Table
 global_means = survey_stats[r2_cols].replace(-999.0, np.nan).mean().reset_index()
 global_means.columns = ["model_key", "mean_r2"]
-global_means["Model"] = global_means["model_key"].map(lambda x: MODEL_CONFIG[x]["name"])
+global_means["Model"] = global_means["model_key"].map(
+    lambda x: ACTIVE_MODEL_CONFIG[x]["name"]
+)
 global_means = global_means.sort_values(by="mean_r2", ascending=False)
 
 # 4. Labels & Logging
-# UPDATED: Logic uses >= and labels reflect strict inclusivity
 label_high = f"High (≥ {thresh_high:.2f})"
 label_med = f"Medium (≥ {thresh_low:.2f} - < {thresh_high:.2f})"
 label_low = f"Low (< {thresh_low:.2f})"
@@ -277,6 +331,7 @@ current_params = {
     "p_range": f"{min_p}-{max_p}",
     "t_low": thresh_low,
     "t_high": thresh_high,
+    "models": len(selected_model_names),
 }
 
 # Change Log Logic
@@ -319,20 +374,26 @@ if should_log:
 # --- SORTING & SELECTION ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Sort Surveys By:**")
+
 sort_option = st.sidebar.selectbox(
     "Sort Criteria",
     [
         "Best R² Score (Desc)",
+        "Worst R² Score (Asc)",
         "ISO3 Code (A-Z)",
         "Year (Desc)",
         "Gini (High-Low)",
+        "Gini (Low-High)",
         "GDP (High-Low)",
+        "GDP (Low-High)",
     ],
     label_visibility="collapsed",
 )
 
-if "R²" in sort_option:
+if sort_option == "Best R² Score (Desc)":
     survey_stats = survey_stats.sort_values(by="best_r2", ascending=False)
+elif sort_option == "Worst R² Score (Asc)":
+    survey_stats = survey_stats.sort_values(by="best_r2", ascending=True)
 elif "ISO3" in sort_option:
     survey_stats = survey_stats.sort_values(
         by=["iso3", "year"], ascending=[True, False]
@@ -341,10 +402,14 @@ elif "Year" in sort_option:
     survey_stats = survey_stats.sort_values(
         by=["year", "iso3"], ascending=[False, True]
     )
-elif "Gini" in sort_option:
+elif sort_option == "Gini (High-Low)":
     survey_stats = survey_stats.sort_values(by="gini_disp", ascending=False)
-elif "GDP" in sort_option:
+elif sort_option == "Gini (Low-High)":
+    survey_stats = survey_stats.sort_values(by="gini_disp", ascending=True)
+elif sort_option == "GDP (High-Low)":
     survey_stats = survey_stats.sort_values(by="gdp_pcap", ascending=False)
+elif sort_option == "GDP (Low-High)":
+    survey_stats = survey_stats.sort_values(by="gdp_pcap", ascending=True)
 
 sorted_survey_list = survey_stats["survey_id"].tolist()
 r2_lookup = dict(zip(survey_stats["survey_id"], survey_stats["best_r2"]))
@@ -374,7 +439,7 @@ except:
     pre_selected_index = 0
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Select Survey**")
+st.sidebar.markdown("**Select Survey (For Single View)**")
 if sorted_survey_list:
     selected_survey = st.sidebar.selectbox(
         "Select Survey",
@@ -397,11 +462,81 @@ st.sidebar.dataframe(
     hide_index=True,
 )
 
+
+# --- PLOT GENERATION HELPER ---
+def generate_survey_figure(survey_id, df_source):
+    """Reusable function to generate the Plotly chart for a specific survey"""
+    dff = df_source[df_source["survey_id"] == survey_id].copy()
+
+    rename_map = {"true_daily_consumption": "TRUE INCOME"}
+    # Only use columns from ACTIVE_MODEL_CONFIG
+    for k, v in ACTIVE_MODEL_CONFIG.items():
+        if v["pred_col"] in dff.columns:
+            rename_map[v["pred_col"]] = v["name"]
+
+    # Filter columns to only include keys in rename_map + percentile
+    cols_to_keep = ["percentile"] + [c for c in rename_map.keys() if c in dff.columns]
+    plot_df = (
+        dff[cols_to_keep]
+        .rename(columns=rename_map)
+        .melt(
+            id_vars=["percentile"],
+            value_vars=[rename_map[c] for c in cols_to_keep if c != "percentile"],
+            var_name="Model",
+            value_name="Prediction",
+        )
+    )
+
+    y_axis_label = "Log(Daily Consumption)" if is_log_y else "Daily Consumption ($)"
+    x_axis_label = "Log(Percentile)" if is_log_x else "Percentile"
+    if is_log_y:
+        plot_df["Prediction"] = np.log(np.maximum(plot_df["Prediction"], 0.01))
+    if is_log_x:
+        plot_df["percentile"] = np.log(np.maximum(plot_df["percentile"], 0.01))
+
+    fig = px.line(
+        plot_df,
+        x="percentile",
+        y="Prediction",
+        color="Model",
+        color_discrete_map=COLOR_PALETTE,
+        category_orders={"Model": MODEL_LOGICAL_ORDER},
+        height=500,
+        labels={"percentile": x_axis_label, "Prediction": y_axis_label},
+        title=f"{survey_id}",
+    )
+    fig.update_layout(
+        template="plotly_white",
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.1),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    fig.update_traces(
+        selector={"name": "TRUE INCOME"},
+        mode="markers",
+        marker=dict(size=8, symbol="circle"),
+    )
+    if "r2_simulated" in ACTIVE_MODEL_CONFIG:
+        fig.update_traces(
+            selector={"name": ACTIVE_MODEL_CONFIG["r2_simulated"]["name"]},
+            line=dict(width=3, dash="dash"),
+        )
+    return fig
+
+
+# --- ACTION CALLBACK: GO TO SURVEY ---
+def go_to_survey(s_id):
+    st.session_state.survey_widget = s_id
+    st.session_state.last_selected_survey = s_id
+    st.session_state.active_tab = "📈 Chart Visualization"
+
+
 # 5. MAIN CONTENT
 st.title(f"Analysis: {scale_mode} Scale")
 
 tab_options = [
     "📈 Chart Visualization",
+    "📉 Chart Feed",
     "📊 Model Analysis",
     "🌍 Survey Scatter",
     "🗺️ Coverage Map",
@@ -410,6 +545,7 @@ tab_options = [
 ]
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "🌍 Survey Scatter"
+
 selected_tab = st.radio(
     "Select View",
     options=tab_options,
@@ -467,9 +603,8 @@ def get_map_dataframe(
     return gdf_map, pct, covered_valid_pop, total_lmic_pop
 
 
-# --- VIEW 1: CHART ---
+# --- VIEW 1: SINGLE CHART ---
 if selected_tab == "📈 Chart Visualization":
-    dff = filtered_df[filtered_df["survey_id"] == selected_survey].copy()
     survey_row = survey_stats[survey_stats["survey_id"] == selected_survey].iloc[0]
 
     current_pop = survey_row["population"]
@@ -478,7 +613,6 @@ if selected_tab == "📈 Chart Visualization":
 
     st.markdown(f"### Survey: {selected_survey}")
 
-    # NEW HEADER METRICS
     m1, m2, m3 = st.columns(3)
     m1.metric(
         "Population",
@@ -491,64 +625,85 @@ if selected_tab == "📈 Chart Visualization":
         "GDP per Capita", f"${current_gdp:,.0f}" if pd.notnull(current_gdp) else "N/A"
     )
 
-    with st.expander(f"Show {scale_mode} R² Scores", expanded=True):
-        score_data = [
-            {"Model Name": MODEL_CONFIG[k]["name"], "R² Score": survey_row[k]}
-            for k in r2_cols
-        ]
+    with st.expander(f"Show {scale_mode} Scores (Active Models)", expanded=True):
+        # UPDATED: Show R2 and RMSE (Log Scale)
+        score_data = []
+        for k in r2_cols:
+            score_data.append(
+                {
+                    "Model Name": ACTIVE_MODEL_CONFIG[k]["name"],
+                    "Log R²": survey_row[k],
+                    "Log RMSE": survey_row.get(f"{k}_rmse", 999.0),
+                }
+            )
+
         st.dataframe(
             pd.DataFrame(score_data)
-            .sort_values(by="R² Score", ascending=False)
-            .style.background_gradient(subset=["R² Score"], cmap="Greens")
-            .format({"R² Score": "{:.2f}"}),
+            .sort_values(by="Log R²", ascending=False)
+            .style.background_gradient(subset=["Log R²"], cmap="Greens")
+            .background_gradient(subset=["Log RMSE"], cmap="Reds")
+            .format({"Log R²": "{:.3f}", "Log RMSE": "{:.3f}"}),
             use_container_width=True,
             hide_index=True,
         )
 
-    rename_map = {"true_daily_consumption": "TRUE INCOME"}
-    for k, v in MODEL_CONFIG.items():
-        if v["pred_col"] in dff.columns:
-            rename_map[v["pred_col"]] = v["name"]
-
-    plot_df = dff.rename(columns=rename_map).melt(
-        id_vars=["percentile"],
-        value_vars=list(rename_map.values()),
-        var_name="Model",
-        value_name="Prediction",
-    )
-
-    y_axis_label = "Log(Daily Consumption)" if is_log_y else "Daily Consumption ($)"
-    x_axis_label = "Log(Percentile)" if is_log_x else "Percentile"
-    if is_log_y:
-        plot_df["Prediction"] = np.log(np.maximum(plot_df["Prediction"], 0.01))
-    if is_log_x:
-        plot_df["percentile"] = np.log(np.maximum(plot_df["percentile"], 0.01))
-
-    fig = px.line(
-        plot_df,
-        x="percentile",
-        y="Prediction",
-        color="Model",
-        color_discrete_map=COLOR_PALETTE,
-        category_orders={"Model": MODEL_LOGICAL_ORDER},
-        height=600,
-        labels={"percentile": x_axis_label, "Prediction": y_axis_label},
-    )
-    fig.update_layout(
-        template="plotly_white",
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.1),
-    )
-    fig.update_traces(
-        selector={"name": "TRUE INCOME"},
-        mode="markers",
-        marker=dict(size=8, symbol="circle"),
-    )
-    fig.update_traces(
-        selector={"name": MODEL_CONFIG["r2_simulated"]["name"]},
-        line=dict(width=3, dash="dash"),
-    )
+    # Use the reusable function
+    fig = generate_survey_figure(selected_survey, filtered_df)
     st.plotly_chart(fig, use_container_width=True)
+
+# --- VIEW 1.5: CHART FEED (NEW) ---
+elif selected_tab == "📉 Chart Feed":
+    st.markdown("### 📉 All Charts Feed")
+    st.caption("Scroll down to view charts. Use pagination to load more.")
+
+    # Pagination controls
+    items_per_page = 100
+    total_items = len(sorted_survey_list)
+    total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+
+    col_page, col_info = st.columns([1, 4])
+    with col_page:
+        page_number = st.number_input(
+            "Page", min_value=1, max_value=total_pages, value=1
+        )
+    with col_info:
+        st.write(
+            f"Showing page {page_number} of {total_pages} ({total_items} total surveys)"
+        )
+
+    start_idx = (page_number - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, total_items)
+    current_batch = sorted_survey_list[start_idx:end_idx]
+
+    # Render loop
+    for s_id in current_batch:
+        # Get stats for this specific survey from the pre-calculated stats df
+        s_stats = survey_stats[survey_stats["survey_id"] == s_id].iloc[0]
+
+        # Header Info with Button
+        col_header, col_btn = st.columns([4, 1])
+        with col_header:
+            st.markdown(f"#### {s_id}")
+        with col_btn:
+            # BUTTON: switches tab and loads survey
+            st.button(
+                "View Details 🔍",
+                key=f"btn_{s_id}",
+                on_click=go_to_survey,
+                args=(s_id,),
+            )
+
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.caption(f"**Best Model:** {s_stats['winning_model']}")
+        col_m2.caption(f"**Best R²:** {s_stats['best_r2']:.3f}")
+        col_m3.caption(
+            f"**Gini:** {s_stats['gini_disp']:.1f} | **GDP:** ${s_stats['gdp_pcap']:,.0f}"
+        )
+
+        # Chart
+        fig = generate_survey_figure(s_id, filtered_df)
+        st.plotly_chart(fig, use_container_width=True)
+        st.divider()
 
 # --- VIEW 2: MODEL ANALYSIS ---
 elif selected_tab == "📊 Model Analysis":
@@ -613,9 +768,6 @@ elif selected_tab == "🌍 Survey Scatter":
         label_low: "#dc3545",
     }
 
-    # ==========================================
-    # 1. MAIN SCATTER PLOT
-    # ==========================================
     col_t1, col_t2 = st.columns([1, 4])
     with col_t1:
         use_pop_size = st.checkbox("Size by Pop?", value=False)
@@ -641,13 +793,8 @@ elif selected_tab == "🌍 Survey Scatter":
     st.plotly_chart(fig_scatter, use_container_width=True)
 
     st.markdown("---")
-
-    # ==========================================
-    # 2. INTERACTIVE BINNING & ANALYSIS
-    # ==========================================
     st.markdown("### 🔬 Detailed Fit Analysis")
 
-    # --- CONTROLS FOR BUCKET SIZES ---
     with st.expander("⚙️ Customize Bucket Sizes", expanded=False):
         c_bin1, c_bin2 = st.columns(2)
         with c_bin1:
@@ -661,19 +808,16 @@ elif selected_tab == "🌍 Survey Scatter":
                 value=2000,
             )
 
-    # --- DYNAMIC BINNING LOGIC ---
-    # 1. Gini Bins
     gini_bins = list(range(0, 101, gini_step))
     gini_labels = [f"{i}-{i+gini_step}" for i in gini_bins[:-1]]
 
     scatter_df["gini_group"] = pd.cut(
         scatter_df["gini_disp"],
-        bins=gini_bins + [200],  # Add a catch-all end
+        bins=gini_bins + [200],
         labels=gini_labels + [f"> {gini_bins[-1]}"],
         right=False,
     )
 
-    # 2. GDP Bins
     max_gdp = scatter_df["gdp_pcap"].max()
     gdp_bins = list(range(0, int(max_gdp) + gdp_step + 1, gdp_step))
     gdp_labels = [f"{int(i/1000)}k-{int((i+gdp_step)/1000)}k" for i in gdp_bins[:-1]]
@@ -682,7 +826,6 @@ elif selected_tab == "🌍 Survey Scatter":
         scatter_df["gdp_pcap"], bins=gdp_bins, labels=gdp_labels, right=False
     )
 
-    # --- PLOT 1: Grouped Bar (Side-by-Side) ---
     def plot_grouped_distribution(group_col, title_label):
         df_grouped = (
             scatter_df.groupby([group_col, "Quality"], observed=False)
@@ -711,7 +854,6 @@ elif selected_tab == "🌍 Survey Scatter":
         fig.update_traces(textposition="auto")
         return fig
 
-    # --- PLOT 2: Strip Plot (Detailed Dots) ---
     def plot_detailed_strip(group_col, x_label):
         counts = scatter_df[group_col].value_counts()
 
@@ -746,7 +888,6 @@ elif selected_tab == "🌍 Survey Scatter":
         )
         return fig
 
-    # --- PLOT 3: Bubble Heatmap ---
     def plot_bubble_grid():
         grid_data = (
             scatter_df.groupby(["gini_group", "gdp_group"], observed=False)
@@ -778,7 +919,6 @@ elif selected_tab == "🌍 Survey Scatter":
         fig.update_traces(text=grid_data["count"], textposition="middle center")
         return fig
 
-    # --- TABS RENDERING ---
     tab_gini, tab_gdp, tab_matrix = st.tabs(
         ["By Gini", "By GDP", "Combined Bubble Grid"]
     )
@@ -825,9 +965,6 @@ elif selected_tab == "🌍 Survey Scatter":
 
     st.markdown("---")
 
-    # ==========================================
-    # 3. OVERALL COUNTS
-    # ==========================================
     st.markdown("### 📊 Overall Fit Quality Distribution")
     quality_counts = scatter_df["Quality"].value_counts().reset_index()
     quality_counts.columns = ["Quality", "Count"]
@@ -942,6 +1079,16 @@ elif selected_tab == "📝 Model Equations":
         f"{Y_term} = \\beta_0 + \\sum_{{k=1}}^{{d}} \\beta_k ({P_term})^k + \\epsilon"
     )
     c2.code("lm(Y ~ poly(pct, degree))", language="r")
+
+    st.markdown("---")
+    st.subheader("8. Segmented (Piecewise)")
+    st.write("Linear slope in the middle (16-84), Quadratic curves in the tails.")
+    c1, c2 = st.columns(2)
+    c1.latex(
+        r"Y = \begin{cases} \beta_0 + \beta_1 P + \beta_2 P^2 & \text{if } P \in \text{Tails} \\ \alpha_0 + \alpha_1 P & \text{if } P \in \text{Middle} \end{cases}"
+    )
+    c2.code("feols(Y ~ gdp + gini:mid + gini:tail + gini:tail^2)", language="r")
+
 
 # --- VIEW 6: LOG ---
 elif selected_tab == "📜 Change Log":
